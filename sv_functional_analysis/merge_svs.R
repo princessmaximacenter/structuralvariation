@@ -40,7 +40,7 @@
 if(FALSE){
   source('~/structuralvariation/sv_functional_analysis/default.conf');
   source('~/structuralvariation/sv_functional_analysis/default.docker.conf');
-  source('~/structuralvariation/sv_functional_analysis/run/wilms_v2_20210923/wilms_v2_20210923.patient_id.conf');
+  source('~/structuralvariation/sv_functional_analysis/run/wilms_v2_20210923/wilms_v2_20210923.patient.conf');
   source('~/structuralvariation/sv_functional_analysis/run/wilms_v2_20210923/wilms_v2_20210923.conf');
   
 }
