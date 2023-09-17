@@ -21,6 +21,35 @@ get_svtype <- function(gr) {
   return(  return_gr$svtype)
 }
 
+
+get_ctx_strands = function(merged_svs) {
+  merged_svs = merged_svs %>% rowwise() %>% 
+    mutate(strand_source_fw= (svtype=="CTX"&grepl("+",sv_merged_coordinate,fixed = T)), 
+           strand_partner_fw= (svtype=="CTX"&grepl("+",partner_sv_merged_coordinate,fixed = T)), 
+           ctx_strands = ifelse(svtype!="CTX",NA,
+                                ifelse(strand_source_fw&strand_partner_fw,"+/+",
+                                       ifelse(strand_source_fw&!strand_partner_fw,"+/-",
+                                              ifelse(!strand_source_fw&strand_partner_fw,"-/+","-/-")))))
+  
+  return(merged_svs)
+}
+
+
+get_ctx_types = function(merged_svs,group_cols=c("patient_label","complex_sv_id")) {
+  if(!"ctx_strands" %in% names(merged_svs)) {
+    print("need ctx_strands")
+    return()
+  }
+  ctx_types = merged_svs %>% 
+    group_by(across(all_of(group_cols))) %>%
+    summarize(ctx_inv_cnt=sum(ctx_strands=="+/+" | ctx_strands=="-/-"),
+              ctx_dup_cnt=sum(ctx_strands=="-/+"),
+              ctx_del_cnt=sum(ctx_strands=="+/-"))
+  
+  return(ctx_types)
+}
+
+
 ## copied from match wgs functions but made safe for ensdb
 annotate_metadata = function(all_gr,metadata_df,metadata_cols=c("tumor_af","normal_af","somatic")) {
   all_gr=all_gr[order(names(all_gr))]
@@ -460,8 +489,9 @@ make_range_svs = function(all_gr,sv_metadata_cols= c("sourceId",  "svtype", "svL
   
   start_coord=rowMin(cbind(start(pairs@first),start(pairs@second)))
   end_coord=rowMax(cbind(end(pairs@first),end(pairs@second)))
-  #start_coord=start(pairs@first)
-  #end_coord=end(pairs@second)
+  strand1 = pairs@first@strand %>% as.character()
+  strand2 = pairs@second@strand %>% as.character()
+  
   
   intra_svs = GRanges(seqnames(pairs@first),IRanges(start=start_coord,end=end_coord))
   
@@ -490,10 +520,14 @@ make_range_svs = function(all_gr,sv_metadata_cols= c("sourceId",  "svtype", "svL
   metadata$partner = metadata$bp_names_origin
   mcols(intra_svs) =  metadata
   names(intra_svs) = intra_svs$bp_name
+  mcols(intra_svs)$strand_origin=paste0(strand1,"/",strand2)
+
   ## if both partner and sv are equal in start position (and entire range) then were excluded before, now just choose 1 and add this one using its metadata   
   
   #concat ctx and intra-partnered,
   mcols(ctx_gr)$bp_names_origin = mcols(ctx_gr)$bp_name
+  mcols(ctx_gr)$strand_origin = as.character(ctx_gr@strand)
+  
   svs=c(intra_svs,ctx_gr)
   if(length(svs)>0)  mcols(svs)$coordinate = paste0(seqnames(svs),":",start(svs),"-",end(svs))
   
@@ -711,7 +745,7 @@ find_same_sv = function(set1,set2,reciprocal_overlap=0.5,svtype_matching=TRUE,ig
   return(bp_mapping)
 }
 
-get_reciprocal_overlap_pairs_start_end = function(svs,properties,reciprocal_overlap=0,svtype_matching=F){
+get_reciprocal_overlap_pairs_start_end = function(svs,properties,reciprocal_overlap=0,svtype_matching=F,ignore_strand=T){
   ## starting bp 
   svs_start = svs
   end(svs_start)=start(svs_start)
@@ -720,12 +754,12 @@ get_reciprocal_overlap_pairs_start_end = function(svs,properties,reciprocal_over
   svs_end = svs
   start(svs_end)=end(svs_end)
   
-  start_overlaps = get_reciprocal_overlap_pairs(svs_start,properties,reciprocal_overlap = reciprocal_overlap,svtype_matching = svtype_matching)
+  start_overlaps = get_reciprocal_overlap_pairs(svs_start,properties,reciprocal_overlap = reciprocal_overlap,svtype_matching = svtype_matching,ignore_strand=ignore_strand)
   if(nrow(start_overlaps)>0){
     start_overlaps$sv_breakpoint_orientation="start"
   }
   
-  end_overlaps = get_reciprocal_overlap_pairs(svs_end,properties,reciprocal_overlap = reciprocal_overlap,svtype_matching = svtype_matching)
+  end_overlaps = get_reciprocal_overlap_pairs(svs_end,properties,reciprocal_overlap = reciprocal_overlap,svtype_matching = svtype_matching,ignore_strand=ignore_strand)
   if(nrow(end_overlaps)>0){
     end_overlaps$sv_breakpoint_orientation="end"
   }
@@ -1152,6 +1186,66 @@ make_sv_bp_gene_partnered = function(sv_bp_gene_overlaps, gene_overlap_cols=c("g
 } 
 
 
+make_sv_bp_gene_partnered = function(sv_bp_gene_overlaps, 
+                                            gene_overlap_cols=c("gene_type","gene_name","gene_id"),
+                                            svs_df_cols = NULL,
+                                            patient_sv_col="patient_sv_name",partner_sv_col="partner_sv_name") {
+#patient_sv_col="patient_sv_merged";partner_sv_col="partner_sv_merged"
+  if(is.null(svs_df_cols)) {
+    svs_df_cols = c(patient_sv_col,partner_sv_col,"patient_sv_merged","svtype") %>% unique()
+  }
+  svs_unique_cols=c(svs_df_cols,gene_overlap_cols)
+  svs_unique_cols=svs_unique_cols[svs_unique_cols %in% names(sv_bp_gene_overlaps)]
+  
+  svs_to_genes = sv_bp_gene_overlaps[,svs_unique_cols] %>% unique()
+  
+  
+  ## For CTX only => rest will not have partner sv name matching like this, 
+  # but do not use     filter(patient_sv_name %in% svs_to_genes$partner_sv_name) because then no longer svs with 1 edge 
+  #if you dont remove sv bp orientation you will get inflated counts
+  
+  sv_bp_gene_partnered_ctx = svs_to_genes %>% filter(svtype=="CTX") %>%
+    left_join(svs_to_genes %>% select(-svtype)%>% dplyr::rename(!!sym(patient_sv_col) := !!sym(partner_sv_col),!!sym(partner_sv_col) := !!sym(patient_sv_col)),
+              by=c(partner_sv_col,patient_sv_col))
+  #by=c(!!sym(partner_sv_col) := !!sym(patient_sv_col), !!sym(patient_sv_col) := !!sym(partner_sv_col)))
+  
+  sv_bp_gene_partnered_ctx = sv_bp_gene_partnered_ctx %>% 
+    dplyr::rename_with(.cols = ends_with(".y"), function(x){paste0("partner_",substr(x,0,stop = (str_length(x)-2)))}) %>% 
+    dplyr::rename_with(.cols = ends_with(".x"), function(x){substr(x,0,stop = (str_length(x)-2))})
+  
+  if(partner_sv_col!="partner_sv_merged" & "partner_patient_sv_merged" %in% names(sv_bp_gene_partnered_ctx)) {
+  sv_bp_gene_partnered_ctx = sv_bp_gene_partnered_ctx %>% dplyr::rename(!!sym(partner_sv_col) := partner_patient_sv_merged)
+  }
+  
+  #with sv bp orientation for intra-svs
+  svs_to_genes_orientation = sv_bp_gene_overlaps[,c(svs_unique_cols,"sv_breakpoint_orientation")] %>% unique()
+  
+  #in case only 'end' coordinate, include it in the first datafame and will not have a partner in the 2nd
+  sv_bp_gene_partnered_intra = svs_to_genes_orientation %>% filter(svtype!="CTX") %>%
+    filter(sv_breakpoint_orientation=="start" | ! (!!sym(patient_sv_col)) %in% filter(svs_to_genes_orientation,sv_breakpoint_orientation=="start")[,patient_sv_col] ) %>% 
+    select(-sv_breakpoint_orientation) %>% unique() 
+  sv_bp_gene_partnered_intra_2 = svs_to_genes_orientation %>% filter(svtype!="CTX") %>%
+    filter(sv_breakpoint_orientation=="end" & !!sym(patient_sv_col) %in% filter(svs_to_genes_orientation,sv_breakpoint_orientation=="start")[,patient_sv_col] ) %>% 
+    select(all_of(c(patient_sv_col,gene_overlap_cols))) %>% unique() %>%
+    dplyr::rename_with(.cols = all_of(gene_overlap_cols), function(x){paste0("partner_",x)}) 
+  
+  sv_bp_gene_partnered_intra = sv_bp_gene_partnered_intra %>% left_join(sv_bp_gene_partnered_intra_2)
+  
+  
+  sv_bp_gene_partnered_intra[,partner_sv_col] = sv_bp_gene_partnered_intra[,patient_sv_col]
+  
+  sv_bp_gene_partnered_cols = c(names(sv_bp_gene_partnered_ctx),names(sv_bp_gene_partnered_intra)) %>% unique()
+  
+  sv_bp_gene_partnered = rbind(sv_bp_gene_partnered_ctx[,sv_bp_gene_partnered_cols],
+                               sv_bp_gene_partnered_intra[,sv_bp_gene_partnered_cols])
+  
+  
+  #check if all rows are there
+  #nrow(sv_bp_gene_overlaps %>% filter(!patient_sv_merged %in% sv_bp_gene_partnered$patient_sv_merged))!=0
+  
+  return(sv_bp_gene_partnered)
+}
+
 ## generic annotation used in sv burden but also recurrence analyses
 
 make_svlen_bin=function(svs_df){
@@ -1337,4 +1431,197 @@ get_sv_gene_flank_overlaps = function(svs,genes_1mb,svs_df,gene_properties_df){
   return(flank_gene_overlaps) 
 }
 
+get_sv_cluster_mapping = function(graph) {
+  independent_sets= igraph::clusters(graph,mode="strong")
+  sv_cluster_mapping=independent_sets$membership %>% as.data.frame()
+  colnames(sv_cluster_mapping)=c("cluster")
+  sv_cluster_mapping$patient_sv_merged = rownames(sv_cluster_mapping)
+  
+  return(sv_cluster_mapping)
+}
 
+
+get_orphan_partner_svs_df = function(orphan_source_svs_df) {
+  #orphan_source_svs_df %>% select(patient_sv_merged,patient_sv_name,coordinate,partner_sv_name,partner_coordinate)
+  #make own metadata df => switch partner and patient for processing
+  orphan_partner_svs = GRanges(orphan_source_svs_df$partner_coordinate) 
+  names(orphan_partner_svs)=orphan_source_svs_df$partner_sv_name
+  orphan_partner_svs$svtype="CTX"
+  orphan_partner_svs$patient_sv_name=names(orphan_partner_svs)
+  orphan_partner_svs$partner_sv_merged=orphan_source_svs_df$patient_sv_merged
+  orphan_partner_svs$partner_sv_name=orphan_source_svs_df$patient_sv_name
+  orphan_partner_svs$patient_label=orphan_source_svs_df$patient_label
+  
+  orphan_partner_svs_df = orphan_partner_svs %>% data.frame() %>% get_gr_coordinate()
+  orphan_partner_svs_df$coordinate = paste0(orphan_partner_svs_df$coordinate,":",orphan_partner_svs_df$strand)
+  return(orphan_partner_svs_df)
+}
+get_orphan_partner_merged = function(orphan_merged_svs, unfiltered_svs_df) {
+  library(igraph)
+  library(openssl)
+  
+  
+  orphan_source_svs_df = unfiltered_svs_df %>% filter(patient_sv_merged %in% filter(orphan_merged_svs)$patient_sv_merged) %>% unique()
+  orphan_partner_svs_df = get_orphan_partner_svs_df(orphan_source_svs_df)
+  orphan_partner_svs = GRanges(orphan_partner_svs_df)
+  names(orphan_partner_svs) = orphan_partner_svs$patient_sv_name
+  
+  orphan_distance=1e6
+  
+  partner_overlaps = get_reciprocal_overlap_pairs(resize_gr_distance(orphan_partner_svs,orphan_distance),resize_gr_distance(orphan_partner_svs,orphan_distance),ignore_strand = F)
+  
+  orphan_partner_svs_cols = names(orphan_partner_svs_df)
+  orphan_partner_svs_cols = orphan_partner_svs_cols[!orphan_partner_svs_cols %in% c("svtype")]
+  orphan_partner_svs_cols_display = orphan_partner_svs_cols[!orphan_partner_svs_cols %in% c("patient_sv_name")]
+  
+  partner_overlaps = partner_overlaps %>% 
+    left_join(orphan_partner_svs_df[,orphan_partner_svs_cols],by=c("set1"="patient_sv_name")) %>% dplyr::rename_with(.cols=orphan_partner_svs_cols_display,.fn=function(x){paste0("set1_",x)}) %>%
+    left_join(orphan_partner_svs_df[,orphan_partner_svs_cols],by=c("set2"="patient_sv_name")) %>% dplyr::rename_with(.cols=orphan_partner_svs_cols_display,.fn=function(x){paste0("set2_",x)}) 
+  
+  #same patient, same partner sv merged, but not same sv
+  partner_overlaps = partner_overlaps %>% 
+    filter(set1_patient_label==set2_patient_label) %>%
+    filter(set1!=set2) %>%
+    filter(set1_partner_sv_merged==set2_partner_sv_merged) %>% unique()
+  
+  partner_overlaps$distance = GenomicRanges::distance(GRanges(partner_overlaps$set1_coordinate),GRanges(partner_overlaps$set2_coordinate),ignore.strand=T)
+  
+  graph = graph_from_data_frame(partner_overlaps[partner_overlaps$distance<1e3,c("set1","set2")],directed=F)
+  
+  cliques=maximal.cliques(graph)
+  orphan_cluster_mapping = get_sv_cluster_mapping(graph) %>% dplyr::rename(patient_sv_name=patient_sv_merged)
+  orphan_partner_sv_clusters = orphan_partner_svs_df %>% left_join(orphan_cluster_mapping) %>%  group_by(partner_sv_merged,cluster) %>% summarize(svs=toString(sort(unique(patient_sv_name))))
+  
+  ## make merged id hash to fill slot of unfiltered svs and get them through merging
+  orphan_partner_sv_clusters = orphan_partner_svs_df %>% left_join(orphan_cluster_mapping) %>% 
+    filter(!is.na(cluster)) %>% 
+    group_by(partner_sv_merged,cluster) %>% summarize(svs_lst=toString(sort(unique(patient_sv_name))), orphan_merged_id=md5(svs_lst),
+                                                      seqnames=unique(seqnames),start=min(start),end=max(end),strand=unique(strand)) %>% ungroup() %>% as.data.frame()
+  #remove the ones that are NA cluster otherwise all not overlapping will be 1 group
+  orphan_partner_sv_clusters = orphan_partner_sv_clusters %>%  filter(!is.na(cluster)) 
+  
+  if(nrow(orphan_partner_sv_clusters)>0) {
+    
+    orphan_partner_sv_clusters = orphan_partner_sv_clusters %>% get_gr_coordinate("partner_sv_merged_coordinate")
+    orphan_partner_sv_clusters$partner_sv_merged_coordinate = paste0(orphan_partner_sv_clusters$partner_sv_merged_coordinate,":",orphan_partner_sv_clusters$strand)
+    
+    #ifelse to prevent M..._orphan_merged_NA
+    orphan_partner_sv_clusters = orphan_partner_sv_clusters %>% select(partner_sv_merged,orphan_merged_id,partner_sv_merged_coordinate,)
+    orphan_source_svs_df = orphan_source_svs_df %>% left_join(orphan_partner_sv_clusters,by=c("patient_sv_merged"="partner_sv_merged")) %>%
+      dplyr::mutate(partner_sv_merged=ifelse(is.na(orphan_merged_id),NA,paste0(patient_label,"_orphan_merged_",orphan_merged_id))) %>% 
+      select(-orphan_merged_id) %>%
+      as.data.frame() %>% unique() 
+  } else {
+    orphan_source_svs_df$partner_sv_merged=NA
+    orphan_source_svs_df$partner_sv_merged_coordinate=NA
+  }
+  
+  
+  #orphan_source_svs_df %>%
+  #  select(patient_label,patient_sv_merged,patient_sv_name,coordinate,partner_sv_name,partner_coordinate,partner_sv_merged) %>% View()
+  
+  return(orphan_source_svs_df)
+}
+
+resolve_orphan_svs = function(merged_svs,unfiltered_svs_df,as_global=T) {
+  #one end merged and check other end
+  #the partner bps not merged => separate function, is that really needed? Maybe not but easier because only filtered
+  orphan_merged_svs = merged_svs %>% filter(svtype=="CTX") %>% filter(is.na(partner_sv_merged_coordinate)) %>% unique()
+  if(orphan_merged_svs %>% nrow()==0) { return(T)}
+  orphan_source_svs_df = get_orphan_partner_merged(orphan_merged_svs,unfiltered_svs_df)
+  
+  #these svs have source in merged now better annotated
+  orphan_merged_svs = orphan_merged_svs %>% select(-partner_sv_merged,-partner_sv_merged_coordinate) %>% left_join(orphan_source_svs_df[,c("patient_sv_merged","partner_sv_merged","partner_sv_merged_coordinate")] %>% unique())
+  #remove then add back, but only the ones that do not have NA of course
+  remain_orphan_svs = unfiltered_svs_df %>% filter(patient_sv_merged %in% filter(orphan_merged_svs,is.na(partner_sv_merged))$patient_sv_merged)
+  orphan_merged_svs = orphan_merged_svs %>% filter(!is.na(partner_sv_merged))
+  
+  if(remain_orphan_svs %>% nrow() > 0) {
+    print("These merged svs had non matching partners")
+    remain_orphan_svs %>% unique()
+  }
+  merged_svs = merged_svs %>% filter(ifelse(svtype=="CTX",!is.na(sv_merged_coordinate)&!is.na(partner_sv_merged_coordinate),TRUE))
+  merged_svs = rbind(merged_svs,orphan_merged_svs)
+  
+  #should also add the partner orphan as 'merged' such that both sides are present in the merged sv df
+  #this should exist: merged_svs %>% filter(patient_sv_merged %in% orphan_merged_svs$partner_sv_merged)
+  
+  orphan_partner_svs_df = get_orphan_partner_svs_df(orphan_source_svs_df) %>% 
+    left_join(orphan_source_svs_df[,c("partner_sv_name","partner_sv_merged","partner_sv_merged_coordinate")] %>%
+                dplyr::rename(patient_sv_merged=partner_sv_merged,patient_sv_merged_coordinate=partner_sv_merged_coordinate),
+              by=c("patient_sv_name"="partner_sv_name")) 
+  
+  #the partner ends with their new merged ids.
+  orphan_partner_svs_df = orphan_partner_svs_df %>% filter(patient_sv_merged %in% orphan_merged_svs$partner_sv_merged) %>% 
+    select(c("patient_sv_name","patient_sv_merged","patient_sv_merged_coordinate","partner_sv_name","partner_sv_merged")) %>% 
+    dplyr::mutate(sv_merged=patient_sv_merged,sv_merged_coordinate=patient_sv_merged_coordinate)
+  
+  #adjust the unfiltered_svs_df
+  #might be confusing because the sv already seems linked? => no it is true, there was already a merged group that wasnt right.. otherwise not multitool
+  #so should reset and reannotate
+  unfiltered_svs_df_bk=unfiltered_svs_df
+  unfiltered_svs_orphan = unfiltered_svs_df_bk %>% 
+    filter(patient_sv_name %in% orphan_partner_svs_df$patient_sv_name) %>% 
+    filter(partner_sv_name %in% orphan_source_svs_df$patient_sv_name)
+  
+  unfiltered_svs_orphan = unfiltered_svs_orphan %>% select(-patient_sv_merged,-sv_merged,-sv_merged_coordinate) %>% left_join(orphan_partner_svs_df)
+  unfiltered_svs_orphan$flag_in_filtered_svs = T
+  
+  
+  #also here adjust partner 
+  unfiltered_svs_orphan_source = unfiltered_svs_df_bk %>% 
+    filter(patient_sv_name %in% orphan_source_svs_df$patient_sv_name)
+  unfiltered_svs_orphan_source = unfiltered_svs_orphan_source %>% select(-patient_sv_merged,-sv_merged,-sv_merged_coordinate) %>% left_join(orphan_source_svs_df %>% dplyr::mutate(sv_merged=patient_sv_merged,patient_sv_merged_coordinate=sv_merged_coordinate)
+                                                                                                                                            %>% select(names(orphan_partner_svs_df)))
+  unfiltered_svs_orphan_source$flag_in_filtered_svs = T
+  
+  #remove and add to dfs
+  unfiltered_svs_df = unfiltered_svs_df_bk %>% 
+    filter(!patient_sv_name %in% orphan_partner_svs_df$patient_sv_name) %>%
+    filter(!patient_sv_name %in% orphan_source_svs_df$patient_sv_name)
+  
+  unfiltered_svs_df = rbind(unfiltered_svs_df,unfiltered_svs_orphan[,names(unfiltered_svs_df)],unfiltered_svs_orphan_source[,names(unfiltered_svs_df)])
+  
+  #make merged svs and add to df 
+  orphan_partner_merged_svs = make_merged_svs(unfiltered_svs_orphan) %>% select(-partner_sv_merged,-partner_sv_merged_coordinate) %>% 
+    left_join(orphan_partner_svs_df[,c("patient_sv_merged","partner_sv_merged")])
+  
+  orphan_partner_merged_svs = orphan_partner_merged_svs %>% left_join(orphan_merged_svs[,c("patient_sv_merged","sv_merged_coordinate")] %>% dplyr::rename(partner_sv_merged_coordinate=sv_merged_coordinate),by=c("partner_sv_merged"="patient_sv_merged")) %>% unique()
+  
+  orphan_partner_merged_svs = orphan_partner_merged_svs  %>% left_join(cohort[,patient_tumor_id_cols])  
+  merged_svs = rbind(merged_svs,orphan_partner_merged_svs[,names(merged_svs)]) %>% unique()
+  
+  
+  merged_svs %>% filter(svtype=="CTX" & !patient_sv_merged %in% merged_svs$partner_sv_merged) %>% nrow() ==0 
+  merged_svs %>% filter(svtype=="CTX" & !partner_sv_merged %in% merged_svs$patient_sv_merged) %>% nrow() ==0 
+  
+  ## remove non autosomal
+  ## TODO later look into ctx with non autosomes to see what we are filtering out
+  non_autosomal_merged_svs = merged_svs %>% filter(!chrom %in% autosomes | (!is.na(partner_chrom) & partner_chrom!="" & !partner_chrom %in% autosomes))
+  
+  merged_svs = merged_svs %>% filter(chrom %in% autosomes & (is.na(partner_chrom) | partner_chrom=="" | partner_chrom %in% autosomes))
+  
+  #add partner coord for ctx matching
+  svs_df = unfiltered_svs_df %>% filter(flag_in_filtered_svs) %>% filter(patient_sv_merged %in% merged_svs$patient_sv_merged)
+  #check if merging goes wrong for orphans? => yes had to reannotate see above [fixed]
+  svs_df = svs_df %>% left_join(merged_svs[,c("patient_sv_merged","sv_merged_coordinate","partner_sv_merged","partner_sv_merged_coordinate","cancer_type")])
+  
+  #check if these still are a thing:
+  if(merged_svs %>% filter(svtype=="CTX") %>% filter(is.na(partner_sv_merged_coordinate)) %>% nrow() > 0) {
+    print("Orphan svs still present?")
+    print(merged_svs %>% filter(svtype=="CTX") %>% filter(is.na(partner_sv_merged_coordinate)) )
+  }
+  
+  #check consistency merged svs and svs df 
+  merged_svs %>% filter(!patient_sv_merged %in% svs_df$patient_sv_merged) %>% nrow() == 0
+  unfiltered_svs_df %>% filter(!patient_sv_merged %in% svs_df$patient_sv_merged) %>% filter(patient_sv_merged %in% merged_svs$patient_sv_merged) %>% nrow() == 0
+  
+  if(as_global) {
+    merged_svs <<- merged_svs
+    unfiltered_svs_df <<- unfiltered_svs_df
+    svs_df <<- svs_df
+    non_autosomal_merged_svs <<- non_autosomal_merged_svs
+  } else {
+    print("Can only be used as global to override merged_svs, unfiltered_svs_df, svs_df")
+  }
+}

@@ -1,10 +1,16 @@
-init_circos_default = function() {
+init_circos_default = function(start_degree = 90, chr_lst=NULL) {
   par(mar = c(1, 1, 1, 1))
-  circos.par("start.degree" = 90)
+  circos.par("start.degree" = start_degree)
   circos.par("track.height" = 0.15)
   circos.par("cell.padding"=c(0.01,0.01),"track.margin"=c(0.02, 0.02))
-  circos.par("canvas.xlim" = c(-1.3, 1.3), "canvas.ylim" = c(-1.3, 1.3))
+  circos.par("canvas.xlim" = c(-1.1, 1.1), "canvas.ylim" = c(-1.1, 1.1))
+  
+  if(is.null(chr_lst)) {
   circos.initializeWithIdeogram(species = "hg38", plotType = c("ideogram","labels"),labels.cex=1)
+  } else {
+    circos.par(gap.degree =20)
+    circos.initializeWithIdeogram(species = "hg38", plotType = c("ideogram","labels"),labels.cex=1,chromosome.index = chr_lst)
+  }
 }
 draw_cna_call = function(plot_seg,draw_loh=F) {
   
@@ -55,19 +61,26 @@ draw_fusions = function(selected_fusions) {
   }
 }
 
-draw_ctx = function(display_ctx) {
+draw_ctx = function(display_ctx,transparency = 0.5,colors=NULL) {
   if(nrow(display_ctx)>0){
     sv_start = GRanges(display_ctx$sv_merged_coordinate) %>% as.data.frame()
     sv_end = GRanges(display_ctx$partner_sv_merged_coordinate) %>% as.data.frame()
     
-    link_colors = rand_color(nrow(sv_start), transparency = 0.5,luminosity = "bright")
+    
+    if(is.null(colors)){
+      link_colors = rand_color(nrow(sv_start), transparency = transparency,luminosity = "bright")
+      colors=link_colors
+    }
+    if("color" %in% names(display_ctx)) {
+      colors=display_ctx$color
+    }
     
     circos.genomicLink(sv_start, sv_end, 
                        col=NA,
-                       border = link_colors)
+                       border = colors)
   }
 }
-draw_intra_svs = function(display_intra_svs) {
+draw_intra_svs = function(display_intra_svs,transparency=0.5) {
   if(nrow(display_intra_svs)>0){
     intra_svs_start = display_intra_svs[,c("seqnames","start")]
     intra_svs_start$end = intra_svs_start$start+1
@@ -77,7 +90,7 @@ draw_intra_svs = function(display_intra_svs) {
     #link_colors = rand_color(nrow(intra_svs_start), transparency = 0.5,luminosity = "bright")
     
     circos.genomicLink(intra_svs_start, intra_svs_end,
-                       col=add_transparency(display_intra_svs$color, 0.5),
-                       border = add_transparency(display_intra_svs$color, 0.5))
+                       col=add_transparency(display_intra_svs$color, transparency),
+                       border = add_transparency(display_intra_svs$color, transparency))
   }
 }

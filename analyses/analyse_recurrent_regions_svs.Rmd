@@ -1,0 +1,744 @@
+---
+title: "Solids tumor cohort - complex svs analysis"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 3
+    toc_float: true
+  pdf_document: default
+date: '2023-06'
+editor_options: 
+  chunk_output_type: console
+---
+<style type="text/css">
+h1 { font-size: 24px; }
+h2 { font-size: 18px; }
+h3 { font-size: 14px; }
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T,
+                      results = "hold",
+                      warning = F,
+                      message = F,
+                      cache=T,
+                      opts.label="kill_prefix",
+                      fig.width=8, fig.height=5,
+                      dev="png") 
+
+```
+
+
+```{r include=F}
+
+suppressPackageStartupMessages({
+  library(tidyverse, quietly=TRUE)
+  library(stringr, quietly=TRUE)
+  library(stringi)
+  library(dplyr, quietly=TRUE)
+  library(GenomicRanges)
+  library(openssl)
+  library(igraph)
+  library(pheatmap)
+  library(RColorBrewer)
+  library(ggrepel)
+})
+
+
+
+root_dir="~/PycharmProjects/"
+source(paste0(root_dir,"structuralvariation/sv_functional_analysis/default.conf"))
+
+source(paste0(script_dir,"functions.general.R"))
+source(paste0(script_dir,"functions.svs.R"))
+source(paste0(script_dir,"functions.expression.R"))
+source(paste0(script_dir,"functions.cna.R"))
+
+source(paste0(wdir,"solids.conf"))
+
+
+## Fill path templates
+autosomes= c(paste("chr",1:22,sep=""),"chrX")
+annotation_colors_call = c(`gain` = "red3", `loh` = "tan2", `loss` = "steelblue3", `amp`="red4")
+
+
+plot_dir=cohort_results_dir
+
+map_template_vars=c('${resources_dir}'=resources_dir,
+                    '${merged_svs_dir}'=merged_svs_dir,
+                    #'${cohort_wdir}'=cohort_wdir,
+                    #'${cohort_identifier}'=cohort_identifier,
+                    '${cna_data_dir}'=cna_data_dir,
+                    '${cna_seg_file_ext}'=cna_seg_file_ext,
+                    '${sequencing_strategy}'="WGS")
+
+run_date=20230701
+merged_svs_classes_path = paste0(cohort_results_dir,"merged_svs_classes.",run_date,".tsv")
+merged_svs_classes_annotated_path = paste0(cohort_results_dir,"merged_svs_classes_annotated.",run_date,".tsv")
+
+merged_svs_anno_100bp_repeats_path = paste0(cohort_results_dir,"merged_svs.100bp_repeat.20230906.tsv")
+
+complex_svs_annotated_path = paste0(cohort_results_dir,"complex_svs_annotated.",run_date,".tsv")
+complex_sv_classification_path = paste0(cohort_results_dir,"complex_sv_classification.",run_date,".tsv")
+
+
+region_size="1mb"
+
+peak_counts_overview_pancancer_path = paste0(cohort_results_dir,"/recurrent_regions/recurrent_regions_svs.counts_overview.pancancer.",region_size,".",run_date,".tsv")
+peak_counts_overview_cancertype_path = paste0(cohort_results_dir,"recurrent_regions/recurrent_regions_svs.counts_overview.cancertype.",region_size,".",run_date,".tsv")
+map_svs_highest_peaks_path = paste0(cohort_results_dir,"/recurrent_regions/recurrent_regions_svs.map_svs_highest_peaks.",region_size,".",run_date,".tsv")
+
+enrichment_results_path = paste0(cohort_results_dir,"enrichment_results.complex_hotspots.",run_date,".tsv")
+
+
+```
+
+
+
+
+
+# Cohort 
+
+Load cohort and annotate 
+
+```{r} 
+cohort = read.table(patient_table_path,sep = "\t", header=T) %>% arrange(patient_id)
+patient_id_to_labels = cohort[,c("patient_id","patient_label")]
+patient_tumor_id_cols = c("patient_id","patient_label","tumor_id","cancer_type")
+
+cohort$patient_label_tumor =  paste0(cohort$patient_label,"_",cohort$tumor_id)
+
+cancer_type_abbrev = read.table(cancer_type_abbrev_path,sep="\t",header=T)
+cohort = cohort %>% left_join(cancer_type_abbrev)
+
+```
+
+
+# Resources
+
+## chromosomes
+```{r}
+
+chromosome_bands_path = stri_replace_all_fixed(chromosome_bands_path_template,names(map_template_vars), map_template_vars,vectorize=F)
+
+chromosome_bands_df = read.table(chromosome_bands_path,header=T,sep="\t",comment.char = "")
+chromosome_bands_df = chromosome_bands_df %>% dplyr::rename("seqnames"="X.chrom","start"="chromStart","end"="chromEnd","cytoband"="name") 
+chromosome_bands_df$cytoband = paste0(chromosome_bands_df$seqnames,chromosome_bands_df$cytoband)
+
+chr_arms = get_chr_arms(chromosome_bands_df)
+chr_arms = GRanges(chr_arms)
+names(chr_arms) = chr_arms$chr_arm
+chr_arms_df = as.data.frame(chr_arms)
+chr_arms_df$chr_arm_width=chr_arms_df$width
+
+chromosome_bands = GRanges(chromosome_bands_df)
+names(chromosome_bands)=chromosome_bands$cytoband
+
+
+chromosomes_df = get_chromosomes(chromosome_bands_df)
+chromosomes = GRanges(chromosomes_df)
+names(chromosomes)=chromosomes_df$seqnames
+
+chr_arm_order = chr_arms_df[gtools::mixedorder(chr_arms_df$chr_arm),c("chr_arm")]# %>% flatten_chr()
+chrom_order = chr_arms_df[gtools::mixedorder(chr_arms_df$seqnames),c("seqnames")] %>% unique()# %>% flatten_chr()
+
+```
+
+## Genes
+
+```{r}
+
+gtf_path = stri_replace_all_fixed(gtf_path_template,names(map_template_vars), map_template_vars,vectorize=F)
+gene_properties_df = get_gene_properties_df(gtf_path)
+
+gene_properties_df$gene_coord = gene_properties_df$to_coordinate
+gene_properties_df$gene_chrom = gene_properties_df$seqnames
+gene_cols=c("gene_id","ensembl_id","gene_name","gene_type","gene_coord","gene_chrom")
+gene_cols = gene_cols[gene_cols %in% names(gene_properties_df)]
+
+genes_of_interest_collection = get_genes_of_interest_collection()
+
+gene_properties_df = gene_properties_df %>% 
+  mutate(flag_gene_of_interest = gene_name %in% genes_of_interest_collection$gene_name,
+         flag_pmc_panel = gene_name %in% filter(genes_of_interest_collection,grepl("pmc_",db_lst))$gene_name) 
+
+gene_properties_df_flags = names(gene_properties_df)[grepl("flag",names(gene_properties_df))]
+for(flag in gene_properties_df_flags) {
+  gene_properties_df[is.na(gene_properties_df[,flag]),flag]=F
+}
+
+gene_df_cols = c(gene_cols,gene_properties_df_flags)
+gene_df_cols[!gene_df_cols %in% names(gene_properties_df)]
+
+
+gene_properties=GRanges(gene_properties_df)
+names(gene_properties) = gene_properties$gene_id
+
+genes_1mb = GRanges(gene_properties_df)
+names(genes_1mb) =genes_1mb$gene_id
+genes_1mb =  resize(genes_1mb, width = width(genes_1mb)+1e6, fix = "center")
+
+```
+
+
+# Read data
+## Load SVs > merged svs classes annotated and repeats
+
+```{r}
+merged_svs = read.table(merged_svs_classes_annotated_path,sep="\t",header=T)
+merged_svs = merged_svs %>%
+  dplyr::mutate(flag_cancer_gene_sv_bp=!is.na(gene_sv_bp_lst),
+                flag_cancer_gene_sv_bp_1mb=!is.na(gene_sv_bp_1mb_lst),
+                flag_cancer_gene_sv_bp_pmc = !is.na(gene_sv_bp_pmc_lst),
+                flag_cancer_gene_sv_bp_1mb_pmc = !is.na(gene_sv_bp_1mb_pmc_lst),
+                )
+
+merged_svs_gr = GRanges(merged_svs$sv_merged_coordinate)
+mcols(merged_svs_gr) = merged_svs %>% select(-start,-end,-seqnames) 
+names(merged_svs_gr) = merged_svs_gr$patient_sv_merged
+
+merged_sv_bp_gr = get_svs_as_bp_gr(merged_svs_gr)
+
+```
+
+
+```{r}
+merged_svs_anno_100bp_repeats = read.table(merged_svs_anno_100bp_repeats_path,sep="\t",header = T)
+merged_svs %>% filter(!patient_sv_merged %in% merged_svs_anno_100bp_repeats$patient_sv_merged) %>% nrow() == 0
+
+merged_svs_anno_100bp_repeats = merged_svs_anno_100bp_repeats %>%  filter(patient_sv_merged %in% merged_svs$patient_sv_merged) 
+
+#use repleft filtered
+#col_name_base="flag_repeat_filtered_repleft"
+#  unanno_svs_df=flag_sv_overlap(unanno_svs_df,sv_bp_repeatmasker_overlaps %>% filter(abs(repLeft)<50),
+#both breakpoints same repeat class 
+#sv_bp_repeatmasker_partnered_filtered_repleft %>% filter(repClass==partner_repClass),
+merged_svs_anno_100bp_repeats %>% names()
+merged_svs_anno_100bp_repeats = merged_svs_anno_100bp_repeats %>% select(patient_sv_merged,contains("filtered_repleft"),contains("segdup"))
+
+repeat_flags = names(merged_svs_anno_100bp_repeats)[grepl("flag_repeat|segdup",names(merged_svs_anno_100bp_repeats))]
+
+```
+
+# Read recurrent peaks to analyse
+
+```{r}
+
+map_svs_highest_peaks = read.table(map_svs_highest_peaks_path,sep = "\t",header=T)
+map_svs_highest_peaks %>% filter(!patient_sv_merged %in% merged_svs$patient_sv_merged) %>% nrow() ==0
+merged_svs %>% filter(!patient_sv_merged %in% map_svs_highest_peaks$patient_sv_merged) %>% nrow() ==0
+
+peak_counts_overview_pancancer = read.table(peak_counts_overview_pancancer_path,sep = "\t",header=T)
+top_recurrent_peaks_pancancer = peak_counts_overview_pancancer %>% filter(complex>2) 
+
+
+svs_to_peaks_annotated = map_svs_highest_peaks %>% select(patient_sv_merged,peak_id) %>%
+  dplyr::mutate(flag_in_complex_hotspot = peak_id %in% top_recurrent_peaks_pancancer$peak_id,
+                flag_in_hotspot = peak_id %in%  filter(peak_counts_overview_pancancer,all>3)$peak_id) 
+
+
+#for plot only but not used
+peak_counts_overview_cancertype = read.table(peak_counts_overview_cancertype_path,sep = "\t",header=T)
+top_recurrent_peaks_cancertype = peak_counts_overview_cancertype %>% filter(complex>2) 
+
+
+```
+# Run enrichments
+
+
+```{r}
+
+merged_svs_anno = merged_svs %>% 
+  left_join(merged_svs_anno_100bp_repeats %>%                                          select(patient_sv_merged,contains("filtered_repleft"),contains("segdup"))) %>%
+  left_join(svs_to_peaks_annotated %>% select(patient_sv_merged,contains("hotspot")))
+
+merged_svs_anno %>% uq_patients()
+
+```
+
+
+```{r}
+
+enrichment_results=data.frame()
+
+filter_column_lst=c("flag_is_complex", "flag_in_complex_hotspot")
+second_filter_column_lst= names(merged_svs_anno)[grepl("flag_repeat|flag_segdup|flag_cancer_gene",names(merged_svs_anno))]
+
+second_filter_column_lst = c(second_filter_column_lst,filter_column_lst)
+
+filter_column="flag_in_complex_hotspot"#"flag_is_complex"
+second_filter="flag_repeat_both_bp_filtered_repleft_all"
+split_attr="cancer_type"
+split_value="pan_cancer"
+
+for(second_filter in second_filter_column_lst) {
+for(filter_column in filter_column_lst) {
+if(second_filter==filter_column) { next() }
+split_value_lst = unique(merged_svs[,split_attr])
+if(split_attr=="cancer_type") { split_value_lst=c("pan_cancer",split_value_lst)}
+for(split_value in split_value_lst) {
+  if(split_value=="pan_cancer") {
+    all_svs_selection = merged_svs_anno
+  } else {
+    all_svs_selection = merged_svs_anno %>% filter(!!sym(split_attr) == split_value)
+
+  }
+  
+  repeat_and_filter = all_svs_selection %>% filter(if_all(second_filter)) %>% filter(if_all(filter_column)) 
+  repeat_not_filter = all_svs_selection %>% filter(if_all(second_filter)) %>% filter(!if_any(filter_column)) 
+    
+  no_repeat_and_filter = all_svs_selection %>% filter(!if_any(second_filter)) %>% filter(if_all(filter_column))
+  no_repeat_not_filter = all_svs_selection %>% filter(!if_any(second_filter)) %>% filter(!if_any(filter_column)) 
+    
+    
+  fisher.table= matrix(c(
+  uq_svs(repeat_and_filter),
+  uq_svs(repeat_not_filter),
+  uq_svs(no_repeat_and_filter),
+  uq_svs(no_repeat_not_filter)
+   ),nrow=2)
+  print(paste0(split_value, " ",second_filter))
+  print(fisher.table)
+  t=fisher.test(fisher.table)
+  print(t)
+  
+  
+  row=c()
+  row$filter_column=filter_column
+  row$split_attr=split_attr
+  row$split_value=split_value
+  row$second_filter=second_filter
+  row$pval=t$p.value
+  row$odds_ratio=t$estimate[[1]]
+  row$conf_int=toString(c(t$conf.int[1],t$conf.int[2]))
+  #frac of svs with bp in repeats that are complex
+  row$frac_repeat_and_condition_of_repeat=uq_svs(repeat_and_filter)/(uq_svs(repeat_and_filter)+uq_svs(repeat_not_filter))
+  #frac of complex svs with bps in repeats
+  row$frac_repeat_and_condition_of_condition=uq_svs(repeat_and_filter)/(uq_svs(repeat_and_filter)+uq_svs(no_repeat_and_filter))
+  #frac of simple svs with bp in repeats
+  row$frac_repeat_and_not_condition_of_not_condition=uq_svs(repeat_not_filter)/(uq_svs(no_repeat_not_filter)+uq_svs(repeat_not_filter))
+  
+  row$repeat_and_filter=uq_svs(repeat_and_filter)
+  row$repeat_not_filter=uq_svs(repeat_not_filter)
+  row$no_repeat_and_filter=uq_svs(no_repeat_and_filter)
+  row$no_repeat_not_filter=uq_svs(no_repeat_not_filter)
+  
+
+  enrichment_results=rbind(enrichment_results,row)
+} 
+}
+}
+
+
+#multiple testing correction
+#enrichment_results$pval_adj = p.adjust(enrichment_results$pval,method="BH")
+
+#write.table(enrichment_results,enrichment_results_path,sep="\t",row.names = F,col.names = T)
+
+```
+
+```{r}
+enrichment_results %>% filter(split_value=="pan_cancer" & pval<0.05 & filter_column=="flag_is_complex")
+enrichment_results %>% filter(split_value=="pan_cancer" & pval<0.05 & filter_column=="flag_in_complex_hotspot")
+```
+
+## "complex hotspots are depleted of svs with bps in repeats"
+
+```{r}
+enrichment_results %>% filter(split_value=="pan_cancer" & pval<0.05 & filter_column=="flag_in_complex_hotspot" & second_filter=="flag_repeat_both_bp_filtered_repleft_all")
+enrichment_results %>% filter(split_value=="pan_cancer" & pval<0.05 & filter_column=="flag_is_complex" & second_filter=="flag_repeat_both_bp_filtered_repleft_all")
+#any bp near repeat
+enrichment_results %>% filter(split_value=="pan_cancer" & pval<0.05 & filter_column=="flag_is_complex" & second_filter=="flag_repeat_all_filtered_repleft")
+
+
+enrichment_results %>% filter(split_value=="pan_cancer" & pval<0.05 & filter_column=="flag_in_complex_hotspot" & grepl("_pmc",second_filter))
+enrichment_results %>% filter(split_value=="pan_cancer" & filter_column=="flag_is_complex" & grepl("_pmc",second_filter))
+```
+
+## manual checks: same as automated analysis
+```{r}
+filter_attr="flag_in_complex_hotspot"
+#filter_attr="flag_in_hotspot"
+
+
+   fisher.table= matrix(c(
+merged_svs_anno %>% filter(if_all(filter_attr)) %>% filter(flag_repeat_both_bp_filtered_repleft_all) %>% uq_svs(),
+merged_svs_anno %>% filter(if_all(filter_attr)) %>% filter(!flag_repeat_both_bp_filtered_repleft_all) %>% uq_svs(),
+merged_svs_anno %>% filter(!if_any(filter_attr)) %>% filter(flag_repeat_both_bp_filtered_repleft_all) %>% uq_svs(),
+merged_svs_anno %>% filter(!if_any(filter_attr)) %>% filter(!flag_repeat_both_bp_filtered_repleft_all) %>% uq_svs()   ),nrow=2)
+  print(fisher.table)
+  t=fisher.test(fisher.table)
+  print(t)
+  sum(fisher.table)==merged_svs_anno %>% nrow()
+  
+fisher.table[1,1] / (fisher.table[1,1]+fisher.table[2,1]) #frac svs in complex hotspot with repeats
+#merged_svs_anno %>% filter(flag_in_complex_hotspot) %>% nrow()
+
+fisher.table[1,2] / (fisher.table[1,2] + fisher.table[2,2]) #frac svs outside of complex hotspot with repeats
+(fisher.table[1,1]+fisher.table[1,2]) / (fisher.table[1,1]+fisher.table[1,2]+fisher.table[2,1]+fisher.table[2,2]) #overall
+
+```
+
+same as in automated analysis
+
+what if only looking at complex? still sign p<0.05 but OR 0.46
+```{r}
+   fisher.table= matrix(c(
+merged_svs_anno %>% filter(flag_is_complex) %>% filter(if_all(filter_attr)) %>% filter(flag_repeat_both_bp_filtered_repleft_all) %>% uq_svs(),
+merged_svs_anno %>% filter(flag_is_complex) %>% filter(if_all(filter_attr)) %>% filter(!flag_repeat_both_bp_filtered_repleft_all) %>% uq_svs(),
+merged_svs_anno %>% filter(flag_is_complex) %>% filter(!if_any(filter_attr)) %>% filter(flag_repeat_both_bp_filtered_repleft_all) %>% uq_svs(),
+merged_svs_anno %>% filter(flag_is_complex) %>% filter(!if_any(filter_attr)) %>% filter(!flag_repeat_both_bp_filtered_repleft_all) %>% uq_svs()   ),nrow=2)
+  print(fisher.table)
+  t=fisher.test(fisher.table)
+  print(t)
+  sum(fisher.table)==merged_svs_anno %>% filter(flag_is_complex) %>% nrow()
+
+   
+fisher.table[1,1] / (fisher.table[1,1]+fisher.table[2,1]) #frac complex svs in complex hotspot with repeats
+fisher.table[1,2] / (fisher.table[1,2] + fisher.table[2,2]) #frac complex svs outside of complex hotspot with repeats
+(fisher.table[1,1]+fisher.table[1,2]) / (fisher.table[1,1]+fisher.table[1,2]+fisher.table[2,1]+fisher.table[2,2]) #overall
+```
+
+# Figures
+## Color by cancer type 
+
+```{r}
+pdf(paste0(plot_dir,"recurrent_regions_svs.selection.pan_cancer.",region_size,".",run_date,".color_by_cancertype.pdf"),width=20,height=4)
+
+peak_cnt_complex_cancer_type = map_svs_highest_peaks %>% filter(flag_is_complex) %>% group_by(peak_id,cancer_type) %>% summarize(complex_per_cancer_type=cnt_str(patient_label))
+#%>% pivot_wider(id_cols = peak_id,values_from = patient_cnt,names_from = cancer_type)
+#also show simple?
+
+peak_cnt_per_cancer_type = map_svs_highest_peaks %>% group_by(peak_id,cancer_type,flag_is_complex) %>% summarize(cnt=cnt_str(patient_label)) %>% pivot_wider(values_from = cnt,names_from = flag_is_complex,values_fill = 0) %>% 
+  dplyr::rename(simple_per_cancer_type=`FALSE`,complex_per_cancer_type=`TRUE`)
+
+
+plot_selected_peaks = peak_counts_overview_pancancer %>% select(peak_id,start,end,seqnames,all,simple,complex) %>%
+  left_join(peak_cnt_per_cancer_type)
+
+#add start end coord for full chrom plotting
+plot_selected_peaks = rbind_no_colmatch(plot_selected_peaks,
+                                        chromosomes_df %>% dplyr::mutate(peak_id=seqnames) %>% select(-chrom_width))
+plot_selected_peaks = plot_selected_peaks %>% filter(seqnames!="chrY")
+
+plot_selected_peaks = plot_selected_peaks  %>% arrange(-start) #plot order
+
+plot_selected_peaks$peak_id = factor(plot_selected_peaks$peak_id,levels=unique(plot_selected_peaks$peak_id))
+plot_selected_peaks$seqnames = factor(plot_selected_peaks$seqnames,levels=chrom_order)
+
+plot_selected_peaks = plot_selected_peaks %>% mutate(selected = peak_id %in% top_recurrent_peaks_pancancer$peak_id)
+
+plot_title="Regions recurrently altered by SVs"
+
+p=ggplot(plot_selected_peaks) +
+  geom_hline(yintercept=0,color="darkgrey") + 
+  facet_grid(cols=vars(seqnames),scales = "free",space="free_x",switch = "x") +
+  theme_classic() + 
+  theme(legend.position = "bottom") +
+  theme(axis.text.x=element_blank(),axis.ticks.x = element_blank(),axis.line.x = element_line(linewidth = 0)) +
+  theme(#panel.border = element_rect(color="black",fill = NA,linewidth = 0.1),
+        panel.spacing = unit(0.5, "lines"),
+        panel.grid.major.y =  element_line(size = 0.1, linetype = 'solid',colour = "grey"),
+        strip.background = element_blank())+
+  ggtitle(paste0(plot_title)) +
+  xlab("") 
+
+#selected peaks, display complex svs against bg of all svs
+bg_peak_color="#DDDDDD"
+p + ggtitle(paste0(plot_title," only n>2 shown: cancer type composition of complex SV hotspots")) + ylab("# patients") +
+  geom_rect(aes(xmin=start,xmax=end,ymin=0,ymax=all),fill=bg_peak_color,alpha=0) +
+  geom_rect(data=filter(plot_selected_peaks,all>2),aes(xmin=start,xmax=end,ymin=0,ymax=all),fill=bg_peak_color,colour=bg_peak_color,linewidth=0.7) +
+  #geom_rect(data=filter(plot_selected_peaks,selected),aes(xmin=start,xmax=end,ymin=0,ymax=all),fill=bg_peak_color,colour=bg_peak_color,linewidth=1.5) +
+  geom_col(data=filter(plot_selected_peaks,selected), aes(x=start,y=complex_per_cancer_type,fill=cancer_type,color=cancer_type),position = "stack",linewidth = 1.5) + 
+  geom_hline(yintercept = 0,color="black") +
+  geom_point(data=filter(plot_selected_peaks,selected),aes(x=start,y=-0.8),color="black",size=1) +
+  scale_fill_manual(values = annotation_colors$cancer_type) + scale_color_manual(values = annotation_colors$cancer_type) +  theme(legend.position = "right")
+
+
+#selected peaks, display complex svs against bg of complex svs
+p + ggtitle(paste0(plot_title,": complex SV hotspots, showing complex svs only")) + ylab("# patients") +
+  geom_rect(aes(xmin=start,xmax=end,ymin=0,ymax=complex),linewidth=1,fill="grey",alpha=0.3) +
+  geom_col(data=filter(plot_selected_peaks,selected), aes(x=start,y=complex_per_cancer_type,fill=cancer_type,color=cancer_type),position = "stack",linewidth = 1) + scale_fill_manual(values = annotation_colors$cancer_type) + scale_color_manual(values = annotation_colors$cancer_type) 
+
+
+#if split fig: selected peaks, display simple svs against bg of simple svs
+p + ggtitle(paste0(plot_title,": complex SV hotspots, showing simple svs only")) + ylab("# patients") +
+  geom_rect(aes(xmin=start,xmax=end,ymin=0,ymax=simple),linewidth=1,fill="grey",alpha=0.3) +
+  geom_col(data=filter(plot_selected_peaks,selected), aes(x=start,y=simple_per_cancer_type,fill=cancer_type,color=cancer_type),position = "stack",linewidth = 1) + scale_fill_manual(values = annotation_colors$cancer_type) + scale_color_manual(values = annotation_colors$cancer_type) 
+
+#composition of simple/complex
+#label for same width
+p + ggtitle(paste0(plot_title,": complex SV hotspots")) + ylab("# patients") +
+  geom_rect(aes(xmin=start,xmax=end,ymin=0,ymax=all),linewidth=0,fill="grey",alpha=0.3) +
+  geom_rect(aes(xmin=start,xmax=end,ymin=0,ymax=simple,fill="simple",color="simple"),linewidth=1,data=filter(plot_selected_peaks,selected))+
+  geom_rect(aes(xmin=start,xmax=end,ymin=simple,ymax=complex+simple,fill="complex",color="complex"),linewidth=1,data=filter(plot_selected_peaks,selected)) +  ylab("patient cnt") 
+
+# cancer type composition of selected peaks regardless of simple or complex, bg of all 
+p + ggtitle(paste0(plot_title,": complex SV hotspots, showing all SVs")) + ylab("# patients") +
+  geom_rect(aes(xmin=start,xmax=end,ymin=0,ymax=all),linewidth=1,fill="grey",alpha=0.3) +
+  geom_col(data=filter(plot_selected_peaks,selected), aes(x=start,y=complex_per_cancer_type+simple_per_cancer_type,fill=cancer_type,color=cancer_type),position = "stack",linewidth = 1) + scale_fill_manual(values = annotation_colors$cancer_type) + scale_color_manual(values = annotation_colors$cancer_type)  + ylab("patient cnt")
+
+dev.off()
+
+```
+```{r}
+pdf(paste0(plot_dir,"recurrent_regions_svs.selection.pan_cancer.",region_size,".",run_date,".color_by_cancertype.explore.pdf"),width=20,height=4)
+
+## explore
+#also colouring 2 complex or more 
+p + ggtitle(paste0(plot_title,": explore regions >1 pt with complex sv, bg all ")) + ylab("# patients") +
+  geom_rect(aes(xmin=start,xmax=end,ymin=0,ymax=all),linewidth=1,fill="grey",alpha=0.3) +
+  geom_col(data=filter(plot_selected_peaks,complex>1),aes(x=start,y=complex_per_cancer_type,fill=cancer_type,color=cancer_type),position = "stack",linewidth = 0.5) + scale_fill_manual(values = annotation_colors$cancer_type) + scale_color_manual(values = annotation_colors$cancer_type) 
+
+p + ggtitle(paste0(plot_title,": explore regions >1 pt with complex sv, bg complex ")) + ylab("# patients") +
+  geom_rect(aes(xmin=start,xmax=end,ymin=0,ymax=complex),linewidth=1,fill="grey",alpha=0.3) +
+  geom_col(data=filter(plot_selected_peaks,complex>1),aes(x=start,y=complex_per_cancer_type,fill=cancer_type,color=cancer_type),position = "stack",linewidth = 0.5) + scale_fill_manual(values = annotation_colors$cancer_type) + scale_color_manual(values = annotation_colors$cancer_type) 
+
+
+# simple >3 against bg of simple svs
+p + ggtitle(paste0(plot_title,": explore regions >3 pt with simple sv, bg all")) + ylab("# patients") +
+  geom_rect(aes(xmin=start,xmax=end,ymin=0,ymax=all),linewidth=1,fill="grey",alpha=0.3) +
+  geom_col(data=filter(plot_selected_peaks,simple>3), aes(x=start,y=simple_per_cancer_type,fill=cancer_type,color=cancer_type),position = "stack",linewidth = 1) + scale_fill_manual(values = annotation_colors$cancer_type) + scale_color_manual(values = annotation_colors$cancer_type) 
+
+
+#all >3 peaks, bg of all 
+p + ggtitle(paste0(plot_title,": explore regions >3 pt with any sv, bg all")) + ylab("# patients") +
+  geom_rect(aes(xmin=start,xmax=end,ymin=0,ymax=all),linewidth=1,fill="grey",alpha=0.3) +
+  geom_col(data=filter(plot_selected_peaks,all>3), aes(x=start,y=complex_per_cancer_type+simple_per_cancer_type,fill=cancer_type,color=cancer_type),position = "stack",linewidth = 1) + scale_fill_manual(values = annotation_colors$cancer_type) + scale_color_manual(values = annotation_colors$cancer_type) 
+
+dev.off()
+```
+
+## simple color complex vs simple
+```{r}
+pdf(paste0(plot_dir,"recurrent_regions_svs.selection.pan_cancer.",region_size,".",run_date,".pdf"),width=20,height=4)
+
+plot_selected_peaks = peak_counts_overview_pancancer
+plot_selected_peaks = plot_selected_peaks  %>% arrange(start)
+plot_selected_peaks$peak_id = factor(plot_selected_peaks$peak_id,levels=plot_selected_peaks$peak_id)
+plot_selected_peaks$seqnames = factor(plot_selected_peaks$seqnames,levels=chrom_order)
+
+plot_selected_peaks = plot_selected_peaks %>% mutate(selected = peak_id %in% top_recurrent_peaks_pancancer$peak_id)
+
+plot_title="Recurrently altered regions by SV bp"
+p=ggplot(plot_selected_peaks,aes(xmin=start,xmax=end,ymin=0)) +
+  geom_hline(yintercept=0,color="darkgrey") + 
+  facet_grid(cols=vars(seqnames),scales = "free",space="free_x") +
+  theme_classic() +
+  theme(legend.position = "bottom") +
+  theme(axis.text.x=element_blank()) +
+  ggtitle(plot_title) 
+
+p +  geom_rect(aes(ymax=all),linewidth=0,fill="grey",alpha=0.3) +
+  geom_rect(aes(ymin=0,ymax=simple,fill="simple"),linewidth=0,data=filter(plot_selected_peaks,selected))+
+  geom_rect(aes(ymin=simple,ymax=complex+simple,fill="complex"),linewidth=0,data=filter(plot_selected_peaks,selected))
+
+p +  geom_rect(aes(ymax=all),linewidth=0,fill="grey",alpha=0.3) +
+  geom_rect(aes(ymin=0,ymax=simple,fill="simple",color="simple"),linewidth=1,data=filter(plot_selected_peaks,selected))+
+  geom_rect(aes(ymin=simple,ymax=complex+simple,fill="complex",color="complex"),linewidth=1,data=filter(plot_selected_peaks,selected))
+
+p +  geom_rect(aes(ymax=complex),linewidth=0,fill="grey",alpha=0.3) +
+  geom_rect(aes(ymax=complex,fill="complex"),linewidth=0,data=filter(plot_selected_peaks,selected)) +
+  ggtitle(paste0(plot_title," showing only complex"))
+
+dev.off()
+
+pdf(paste0(plot_dir,"recurrent_regions_svs.selection.cancer_type.",region_size,".",run_date,".pdf"),width=20,height=8)
+
+plot_selected_peaks = peak_counts_overview_cancertype
+plot_selected_peaks = plot_selected_peaks  %>% arrange(start)
+plot_selected_peaks$peak_id = factor(plot_selected_peaks$peak_id,levels=unique(plot_selected_peaks$peak_id))
+plot_selected_peaks$seqnames = factor(plot_selected_peaks$seqnames,levels=chrom_order)
+
+plot_selected_peaks = plot_selected_peaks %>% mutate(selected = peak_id %in% top_recurrent_peaks_pancancer$peak_id,
+                                                     selected_cancertype = peak_id %in% top_recurrent_peaks_cancertype$peak_id)
+
+
+
+p=ggplot(plot_selected_peaks,aes(xmin=start,xmax=end,ymin=0)) +
+  geom_hline(yintercept=0,color="darkgrey") + 
+  facet_grid(cols=vars(seqnames),rows=vars(cancer_type),scales = "free",space="free_x") +
+  theme_classic() +
+  theme(legend.position = "bottom") +
+  theme(axis.text.x=element_blank()) +
+  ggtitle(paste0(plot_title," within cancer type")) 
+
+p +  geom_rect(aes(ymax=all),linewidth=0,fill="grey",alpha=0.3) +
+  geom_rect(aes(ymin=0,ymax=simple,fill="simple"),linewidth=0,data=filter(plot_selected_peaks,selected_cancertype))+
+  geom_rect(aes(ymin=simple,ymax=complex+simple,fill="complex"),linewidth=0,data=filter(plot_selected_peaks,selected_cancertype)) +
+  ggtitle(paste0(plot_title," within cancer type, cancer type selected peaks")) 
+
+
+
+p +  geom_rect(aes(ymax=complex),linewidth=0,fill="grey",alpha=0.3) +
+  geom_rect(aes(ymax=complex,fill="complex"),linewidth=0,data=filter(plot_selected_peaks,selected_cancertype)) +
+  ggtitle(paste0(plot_title," within cancer type, cancer type selected peaks, showing only complex"))
+
+
+  
+p +  geom_rect(aes(ymax=all),linewidth=0,fill="grey",alpha=0.3) +
+  geom_rect(aes(ymin=0,ymax=simple,fill="simple"),linewidth=0,data=filter(plot_selected_peaks,selected))+
+  geom_rect(aes(ymin=simple,ymax=complex+simple,fill="complex"),linewidth=0,data=filter(plot_selected_peaks,selected)) +
+  ggtitle(paste0(plot_title," within cancer type, pan cancer selected peaks")) 
+
+
+
+p +  geom_rect(aes(ymax=complex),linewidth=0,fill="grey",alpha=0.3) +
+  geom_rect(aes(ymax=complex,fill="complex"),linewidth=0,data=filter(plot_selected_peaks,selected)) +
+  ggtitle(paste0(plot_title," within cancer type, pan cancer selected peaks, showing only complex"))
+
+
+#TODO; add cancer types like I added the complex/non complex but need really wide dataframe for that
+
+
+dev.off()
+
+```
+
+
+
+# Manual look
+
+```{r}
+
+top_recurrent_peaks_cancertype # 8 peaks => 3 or more patients of same cancer type having complex sv bps 
+top_recurrent_peaks_pancancer %>% #13 peaks => 3 or more patients having complex sv bps 
+  filter(!peak_id %in% top_recurrent_peaks_cancertype$peak_id) #additional
+
+peak_counts_overview_pancancer %>% filter(all>2 & complex>1) %>%
+  filter(!peak_id %in% top_recurrent_peaks_pancancer$peak_id) %>%
+  arrange(-all)# %>% View()
+
+
+```
+
+```{r}
+peak_counts_overview_pancancer$complex %>% quantile(probs = seq(0, 1, 0.05))
+```
+
+
+## quantification /stats
+
+how many complex svs have at least 1 bp in a recurrent region?
+
+
+```{r}
+map_svs_highest_peaks %>% filter(peak_id %in% top_recurrent_peaks_pancancer$peak_id) %>% ungroup() %>% filter(flag_is_complex) %>% select(complex_sv_id) %>% unique() %>% nrow()
+
+map_svs_highest_peaks %>% filter(peak_id %in% filter(peak_counts_overview_pancancer,complex>1)$peak_id) %>% ungroup() %>% filter(flag_is_complex)  %>% select(complex_sv_id) %>% unique() %>% nrow()
+
+map_svs_highest_peaks$complex_sv_id %>% unique() %>% length() == merged_svs$complex_sv_id %>% unique() %>% length()
+```
+
+
+
+# [deprecated] look into recurrent regions 
+## overlap svs with genes
+```{r}
+#sanity check all with sv also in our sv merged anno
+
+overlaps_genes_svs_1mb = get_reciprocal_overlap_pairs(genes_1mb,merged_sv_bp_gr,ignore_strand = T,svtype_matching = F,reciprocal_overlap=0) %>%
+      dplyr::rename(gene_id=set1, patient_sv_merged = set2 ) %>% 
+      left_join(gene_properties_df[,gene_df_cols]) %>%
+      left_join(merged_svs %>% dplyr::select(patient_sv_merged,sv_merged_coordinate,"svtype","tumor_af_mean",contains("complex"),patient_label,cancer_type))
+    
+overlaps_genes_svs_1mb = overlaps_genes_svs_1mb %>% dplyr::mutate(patient_gene = paste0(patient_label,"_",gene_name))
+
+overlaps_genes_svs_1mb$distance = distance(GRanges(overlaps_genes_svs_1mb$gene_coord),GRanges(overlaps_genes_svs_1mb$sv_merged_coordinate))
+
+    
+overlaps_genes_svs = get_reciprocal_overlap_pairs(gene_properties,merged_sv_bp_gr,ignore_strand = T,svtype_matching = F,reciprocal_overlap=0) %>%
+      dplyr::rename(gene_id=set1, patient_sv_merged = set2 ) %>% 
+      left_join(gene_properties_df[,gene_df_cols]) %>%
+      left_join(merged_svs %>% dplyr::select(patient_sv_merged,"svtype","tumor_af_mean",contains("complex"),patient_label,cancer_type))
+
+overlaps_genes_svs = overlaps_genes_svs %>% dplyr::mutate(patient_gene = paste0(patient_label,"_",gene_name))
+
+```
+
+## manual look
+```{r}
+recurrent_peaks_svs = map_svs_highest_peaks %>% ungroup() %>% 
+  left_join(overlaps_genes_svs %>% filter(flag_gene_of_interest) %>% group_by(patient_sv_merged) %>% summarize(gene_sv_bp_lst=lst_str(gene_name))) %>% 
+  left_join(overlaps_genes_svs_1mb %>% filter(flag_gene_of_interest) %>% group_by(patient_sv_merged) %>% summarize(gene_sv_bp_1mb_lst=lst_str(gene_name))) %>% 
+  arrange(peak_id,cancer_type,patient_label) %>% merge(top_recurrent_peaks_pancancer %>%
+                                                         select(peak_id,complex,simple,contains("genes")))  
+
+target_gene = "DAXX"
+target_peak_svs = filter(recurrent_peaks_svs,grepl(target_gene,genes_1mb_lst))
+
+target_peak_svs 
+
+#"peak_chr16_85"
+#"peak_chr17_131"
+#"peak_chr1_163"
+target_peak_id = "peak_chr2_215"
+target_peak_svs = filter(recurrent_peaks_svs,peak_id == target_peak_id)
+
+target_peak_svs %>% select(peak_id,patient_label,set1_svtype,complex_sv_class_super,cancer_type,complex_sv_id,contains("gene")) %>% unique() %>% arrange(gene_sv_bp_lst)
+
+patient_gene_overview_all_cancer %>% filter(complex_sv_id %in% target_peak_svs$complex_sv_id & gene_name=="ALK") %>% select(gene_name,patient_label,cr_l2fc_50,contains("complex"))
+
+```
+
+strongly depleted 
+```{r}
+
+#sanity check complex svs are enriched in complex hotspots - not in any hotspot - duh
+#flag_in_complex_hotspot
+ fisher.table= matrix(c(
+merged_svs_anno %>% filter(flag_is_complex&flag_in_hotspot) %>% uq_svs(),
+merged_svs_anno %>% filter(flag_is_complex&!flag_in_hotspot) %>% uq_svs(),
+merged_svs_anno %>% filter(!flag_is_complex&flag_in_hotspot) %>% uq_svs(),
+merged_svs_anno %>% filter(!flag_is_complex&!flag_in_hotspot) %>% uq_svs()   ),nrow=2)
+  print(fisher.table)
+  t=fisher.test(fisher.table)
+  print(t)
+
+#barely significant depleted; considering all svs in complex hotspots then fewer complex
+#considering complex in any hotspot then better sign and depletion
+
+filter_attr="flag_in_complex_hotspot"
+#filter_attr="flag_in_hotspot"
+   fisher.table= matrix(c(
+merged_svs_anno %>% filter(if_all(filter_attr)) %>% filter(flag_is_complex&flag_repeat_both_bp_filtered_repleft_all) %>% uq_svs(),
+merged_svs_anno %>% filter(if_all(filter_attr)) %>% filter(flag_is_complex&!flag_repeat_both_bp_filtered_repleft_all) %>% uq_svs(),
+merged_svs_anno %>% filter(if_all(filter_attr)) %>% filter(!flag_is_complex&flag_repeat_both_bp_filtered_repleft_all) %>% uq_svs(),
+merged_svs_anno %>% filter(if_all(filter_attr)) %>% filter(!flag_is_complex&!flag_repeat_both_bp_filtered_repleft_all) %>% uq_svs()   ),nrow=2)
+  print(fisher.table)
+  t=fisher.test(fisher.table)
+  print(t)
+
+  #svs in hotspots general  
+fisher.table[1,1] / fisher.table[2,1] #complex
+fisher.table[1,2] / fisher.table[2,2] #simple
+(fisher.table[1,1]+fisher.table[1,2]) / (fisher.table[2,1]+fisher.table[2,2]) #overall
+
+```
+
+considering all svs in repeats, are there more in or out of hotspots?
+no then there are more complex svs due to repeats in complex hotspots than simple out of hotspots => not a good comparison because of already enrichment of complex svs in complex hotspots
+```{r}
+   fisher.table= matrix(c(
+merged_svs_anno %>% filter(flag_repeat_both_bp_filtered_repleft_all) %>% filter(flag_is_complex&flag_in_complex_hotspot) %>% uq_svs(),
+merged_svs_anno %>% filter(flag_repeat_both_bp_filtered_repleft_all) %>% filter(flag_is_complex&!flag_in_complex_hotspot) %>% uq_svs(),
+merged_svs_anno %>% filter(flag_repeat_both_bp_filtered_repleft_all) %>% filter(!flag_is_complex&flag_in_complex_hotspot) %>% uq_svs(),
+merged_svs_anno %>% filter(flag_repeat_both_bp_filtered_repleft_all) %>% filter(!flag_is_complex&!flag_in_complex_hotspot) %>% uq_svs()   ),nrow=2)
+  print(fisher.table)
+  t=fisher.test(fisher.table)
+  print(t)
+  
+merged_svs_anno %>% filter(flag_repeat_both_bp_filtered_repleft_all) %>% filter(flag_is_complex&flag_in_complex_hotspot) %>% uq_svs()  / merged_svs_anno %>% filter(flag_repeat_both_bp_filtered_repleft_all) %>% filter(flag_is_complex) %>% uq_svs()
+
+merged_svs_anno %>% filter(flag_in_complex_hotspot) %>% filter(flag_is_complex) %>% uq_svs()  / merged_svs_anno %>% filter(flag_is_complex) %>% uq_svs()
+
+```
+
+todo later check hbl simple svs which peaks
+
+```{r}
+map_svs_highest_peaks %>% filter(patient_sv_merged %in% filter(merged_svs,(cancer_type=="hepatoblastoma" & chr_arm=="chr1p"))$patient_sv_merged)
+```
+
+

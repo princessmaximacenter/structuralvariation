@@ -1,0 +1,1105 @@
+---
+title: "Solids tumor cohort - complex svs analysis"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 3
+    toc_float: true
+  pdf_document: default
+date: '2023-06'
+editor_options: 
+  chunk_output_type: console
+---
+<style type="text/css">
+h1 { font-size: 24px; }
+h2 { font-size: 18px; }
+h3 { font-size: 14px; }
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T,
+                      results = "hold",
+                      warning = F,
+                      message = F,
+                      cache=T,
+                      opts.label="kill_prefix",
+                      fig.width=8, fig.height=5,
+                      dev="png") 
+
+```
+
+
+```{r include=F}
+
+suppressPackageStartupMessages({
+  library(tidyverse, quietly=TRUE)
+  library(stringr, quietly=TRUE)
+  library(stringi)
+  library(dplyr, quietly=TRUE)
+  library(GenomicRanges)
+  library(openssl)
+  library(igraph)
+  library(pheatmap)
+  library(RColorBrewer)
+  library(ggrepel)
+  library(ggpattern)
+})
+
+
+
+root_dir="~/PycharmProjects/"
+source(paste0(root_dir,"structuralvariation/sv_functional_analysis/default.conf"))
+
+source(paste0(script_dir,"functions.general.R"))
+source(paste0(script_dir,"functions.svs.R"))
+source(paste0(script_dir,"functions.expression.R"))
+source(paste0(script_dir,"functions.cna.R"))
+
+source(paste0(wdir,"solids.conf"))
+
+
+## Fill path templates
+autosomes= c(paste("chr",1:22,sep=""),"chrX")
+annotation_colors_call = c(`gain` = "red3", `loh` = "tan2", `loss` = "steelblue3", `amp`="red4")
+
+
+plot_dir=cohort_results_dir
+
+map_template_vars=c('${resources_dir}'=resources_dir,
+                    '${merged_svs_dir}'=merged_svs_dir,
+                    #'${cohort_wdir}'=cohort_wdir,
+                    #'${cohort_identifier}'=cohort_identifier,
+                    '${cna_data_dir}'=cna_data_dir,
+                    '${cna_seg_file_ext}'=cna_seg_file_ext,
+                    '${sequencing_strategy}'="WGS")
+
+run_date=20230701
+merged_svs_classes_path = paste0(cohort_results_dir,"merged_svs_classes.",run_date,".tsv")
+merged_svs_classes_annotated_path = paste0(cohort_results_dir,"merged_svs_classes_annotated.",run_date,".tsv")
+complex_svs_annotated_path = paste0(cohort_results_dir,"complex_svs_annotated.",run_date,".tsv")
+complex_sv_classification_path = paste0(cohort_results_dir,"complex_sv_classification.",run_date,".tsv")
+complex_svs_effect_path = paste0(cohort_results_dir,"complex_svs_annotated.",run_date,".effect.tsv")
+driver_gene_alterations_path = paste0(cohort_results_dir,"clinrel_mutations_incl_prognostic.",run_date,".tsv")
+
+tmb_path=paste0(cohort_results_dir,"cohort_snv_burden_somatic.",run_date,".tsv")
+fga_path=paste0(cohort_results_dir,"cohort_fga_per_chrom.",run_date,".tsv")
+complex_fga_path = paste0(cohort_results_dir,"cohort_fga_per_chrom.complex.",run_date,".tsv")
+ploidy_path=paste0(cohort_results_dir,"cohort_ploidy.",run_date,".tsv")
+cohort_fga_per_chrom_per_call_path = paste0(cohort_results_dir,"cohort_fga_per_chrom_per_call.",run_date,".tsv")
+
+mutation_burden_path = paste0(cohort_results_dir,"mutation_burden.",run_date,".tsv")
+clinical_events_enrichment_path = paste0(cohort_results_dir,"enrichment_results.clinical_events.",run_date,".tsv")
+mutation_burden_enrichment_path = paste0(cohort_results_dir,"enrichment_results.mutation_burden.",run_date,".tsv")
+
+
+
+```
+
+
+```{r}
+
+annotation_colors$complex_sv_classes = c(
+`amplicon` = "#66c2a5",
+`chromoplexy`="#fc8d62",
+`chromothripsis`="#8da0cb",
+`complex_other`="#e78ac3",
+`sv_pair_ctx`="#a6d854",
+`sv_pair`="#ffd92f",
+`reciprocal_ctx`="#e5c494",
+`simple`="#dddddd")
+
+
+annotation_colors$complex_sv_superclasses = c(
+`amplicon` = "#66c2a5",
+`chromoplexy`="#fc8d62",
+`chromothripsis`="#8da0cb",
+`complex_other`="#e78ac3",
+`simple`="#dddddd")
+
+cancer_type.labs = c("EWS","NBL","fpRMS","fnRMS","WT","HBL")
+names(cancer_type.labs) = c("ewing_sarcoma","neuroblastoma","alveolar_rhabdomyosarcoma","embryonal_rhabdomyosarcoma","nephroblastoma","hepatoblastoma")
+
+```
+
+
+# Functions
+
+# Cohort 
+
+Load cohort and annotate 
+
+```{r} 
+cohort = read.table(patient_table_path,sep = "\t", header=T) 
+patient_tumor_id_cols = c("patient_label","tumor_id","cancer_type")
+
+```
+
+
+# Read data
+## Load SVs > merged svs classes
+
+```{r}
+merged_svs = read.table(merged_svs_classes_annotated_path,sep="\t",header=T)
+complex_svs_annotated = read.table(complex_svs_effect_path,sep="\t",header=T)
+complex_sv_classification = read.table(complex_sv_classification_path,sep="\t",header=T)
+
+```
+
+
+## Driver alterations 
+
+2023-09-03 moved making table clinrel_mutations_incl_prognostic to dedicated script (utils/make_driver_gene_alteration_overview.R)
+```{r}
+
+clinrel_mutations_incl_prognostic = read.table(driver_gene_alterations_path, sep="\t",header=T)
+driver_gene_alteration = clinrel_mutations_incl_prognostic
+
+driver_gene_alteration_complex_summary= clinrel_mutations_incl_prognostic %>% filter(complex_sv_alteration) %>% 
+  group_by(patient_label,complex_sv_id) %>% summarize(driver_gene_lst=lst_str(gene_name),sv_driver_expected=any(sv_expected),complex_sv_driver_gene_expected=any(complex_sv_expected))
+
+tp53_or_mdm2_mutations = clinrel_mutations_incl_prognostic  %>% filter(gene_name %in% c("TP53","MDM2"))
+
+```
+
+#  Make overview patient_level_complex_sv_overview
+```{r}
+
+complex_svs_per_patient = merged_svs %>% 
+  filter(flag_is_complex) %>% 
+  group_by(patient_label) %>% summarize(complex_svs_cnt=cnt_str(complex_sv_id),complex_classes_cnt=cnt_str(complex_sv_class_super),complex_classes_lst=lst_str(complex_sv_class_super)) %>% arrange(-complex_classes_cnt) %>% as.data.frame()
+
+patient_level_complex_sv_overview = cohort  %>% 
+  left_join(complex_svs_per_patient) %>% 
+  dplyr::mutate(complex_sv = patient_label %in% filter(merged_svs,flag_is_complex)$patient_label,
+                complex_svs_cnt= ifelse(is.na(complex_svs_cnt),0,complex_svs_cnt),
+                complex_sv_driver_gene = patient_label %in% driver_gene_alteration_complex_summary$patient_label,
+                sv_driver_expected = patient_label %in%
+                  filter(driver_gene_alteration_complex_summary,sv_driver_expected)$patient_label,
+                complex_sv_driver_gene_expected = patient_label %in%
+                  filter(driver_gene_alteration_complex_summary,complex_sv_driver_gene_expected)$patient_label,
+                driver_gene_mutated = patient_label %in% clinrel_mutations_incl_prognostic$patient_label,
+                driver_gene_mutated_no_complex = patient_label %in% filter(clinrel_mutations_incl_prognostic,!complex_sv_alteration)$patient_label,
+                 complex_sv_any_effect = patient_label %in% filter(complex_svs_annotated,effect!="unknown")$patient_label,
+                tp53_or_mdm2 = patient_label %in% tp53_or_mdm2_mutations$patient_label)
+
+complex_svs_driver_cnts = complex_svs_annotated %>% filter(!is.na(driver_gene_lst)) %>% group_by(patient_label) %>% summarize(complex_svs_cnt_driver=cnt_str(complex_sv_id))
+
+if("complex_svs_cnt_driver" %in% names(patient_level_complex_sv_overview)) {
+patient_level_complex_sv_overview = patient_level_complex_sv_overview %>% select(-complex_svs_cnt_driver) 
+}
+patient_level_complex_sv_overview = patient_level_complex_sv_overview %>% left_join(complex_svs_driver_cnts)
+patient_level_complex_sv_overview[is.na(patient_level_complex_sv_overview$complex_svs_cnt_driver),c("complex_svs_cnt_driver")]=0
+
+patient_level_complex_sv_overview$remark=""
+tumors_with_connected_amplicons = c("M962AAB","M959AAB","M157AAB")
+patient_level_complex_sv_overview[patient_level_complex_sv_overview$patient_label %in% tumors_with_connected_amplicons,c("remark")]="Two complex SV clusters connected by low AF SVs so single event"
+
+
+```
+
+## export supplementary table
+
+```{r}
+cohort  = cohort %>% left_join(patient_level_complex_sv_overview %>% select(patient_label, driver_gene_mutated, complex_sv, complex_sv_driver_gene))
+
+#should be sufficient to perform analysis => the complex sv annotation added in analysis document
+
+write.table(cohort,paste0(metadata_dir,"cohort.solids_v4.20230630.supplementary_table.tsv"),sep="\t",col.names = T,row.names = F,quote=T)
+
+```
+# Mutation burden
+
+## quantification svs complex svs
+```{r}
+quantification_svs = merged_svs
+quant_svs_total = quantification_svs %>% cnt_uq(uq_id="patient_sv_merged",group_cols = c("patient_label"),attr_name = "total")
+
+label_order_svs = quant_svs_total %>% arrange(-total) %>% select(patient_label) %>% flatten_chr()
+label_order_svs = c(label_order_svs, cohort %>% filter(!patient_label %in% label_order_svs) %>% select(patient_label) %>% flatten_chr())
+
+
+```
+
+```{r}
+##super classes count svs
+## different classes of complex 
+superclasses = quantification_svs$complex_sv_class_super %>% unique()
+superclasses = superclasses[!is.na(superclasses)]
+
+quant_svs_superclasses = cohort[,c("patient_label"),drop=F]
+
+for(complex_class in superclasses) {
+  quant_svs_superclasses = quant_svs_superclasses %>% left_join( 
+  quantification_svs %>% filter(complex_sv_class_super==complex_class) %>% cnt_uq(uq_id="patient_sv_merged",group_cols = c("patient_label"),attr_name = complex_class) ) 
+}
+  
+quant_svs_superclasses_wide = quant_svs_superclasses
+
+quant_svs_superclasses = quant_svs_superclasses_wide %>% pivot_longer(-patient_label,values_to = "cnt",names_to = "attr") %>% left_join(cohort[,c("patient_label","cancer_type")])
+
+
+quant_svs_superclasses$patient_label=factor(quant_svs_superclasses$patient_label,levels=label_order_svs)
+quant_svs_superclasses[is.na(quant_svs_superclasses)]=0
+
+
+```
+
+```{r}
+
+## counting complex events
+quant_complex_superclasses = cohort[,c("patient_label"),drop=F]  
+
+for(complex_class in superclasses) {
+  quant_complex_superclasses = quant_complex_superclasses %>% left_join( 
+  quantification_svs %>% filter(complex_sv_class_super==complex_class) %>% cnt_uq(uq_id="complex_sv_id",group_cols = c("patient_label"),attr_name = complex_class) ) 
+}
+
+quant_complex_superclasses_wide = quant_complex_superclasses
+
+
+```
+
+## make mutation burden table
+
+
+```{r}
+cohort_tmb = read.table(tmb_path,sep="\t",header=T)
+cohort_tmb = cohort_tmb %>% left_join(cohort[,c("patient_label","cancer_type","sample_days_after_diagnosis")])
+
+cohort_fga = read.table(fga_path,sep="\t",header = T) 
+cohort_fga = cohort_fga %>% filter(seqnames=="total")
+cohort_fga = cohort_fga %>% left_join(cohort[,c("patient_label","cancer_type")])
+
+complex_fga = read.table(complex_fga_path,sep="\t",header = T) 
+complex_fga = complex_fga %>% filter(seqnames=="total")
+complex_fga = complex_fga %>% left_join(cohort[,c("patient_label","cancer_type")])
+
+cohort_ploidy = read.table(ploidy_path,sep="\t",header=T)
+
+cohort_fga_per_chrom_per_call = read.table(cohort_fga_per_chrom_per_call_path,sep="\t",header = T) 
+cohort_fga_per_chrom_per_call = cohort_fga_per_chrom_per_call %>% filter(seqnames=="total") %>% left_join(cohort[,c("patient_label","cancer_type")])
+
+cohort_fga_gain = cohort_fga_per_chrom_per_call %>% filter(cn_type=="gain")
+cohort_fga_loss = cohort_fga_per_chrom_per_call %>% filter(cn_type=="loss")
+
+mutation_burden_overview_cols = c("patient_label","cancer_type","cnt_type","cnt","attr")
+mutation_burden_overview = rbind_no_colmatch(
+  quant_svs_superclasses %>% dplyr::mutate(cnt_type="1.complex_svs") %>% select(mutation_burden_overview_cols),
+  cohort_tmb %>% dplyr::mutate(cnt_type="2.snv_indel",cnt=snv_indel_somatic_nonsyn_cnt,attr="snv_indel_somatic_nonsyn_cnt") %>% select(mutation_burden_overview_cols))
+
+mutation_burden_overview = rbind_no_colmatch(mutation_burden_overview,
+                                  cohort_fga_gain %>% dplyr::mutate(cnt_type="3.fga",cnt=fga,attr="fga_gain")  %>% select(mutation_burden_overview_cols))
+
+mutation_burden_overview = rbind_no_colmatch(mutation_burden_overview,
+                                  cohort_fga_loss %>% dplyr::mutate(cnt_type="3.fga",cnt=fga,attr="fga_loss")  %>% select(mutation_burden_overview_cols))
+
+mutation_burden_overview = rbind_no_colmatch(mutation_burden_overview,
+                                  cohort_ploidy %>% dplyr::mutate(cnt_type="4.ploidy",cnt=custom_ploidy,attr="ploidy")  %>% select(mutation_burden_overview_cols))
+
+mutation_burden_overview = rbind_no_colmatch(mutation_burden_overview,
+                                  complex_fga %>% dplyr::mutate(cnt_type="5.complex_fga",cnt=fga_complex,attr="complex_fga")  %>% select(mutation_burden_overview_cols))
+
+mutation_burden_overview = rbind_no_colmatch(mutation_burden_overview,
+cohort_tmb %>% dplyr::mutate(cnt_type="6.tmb",cnt=snv_indel_somatic_nonsyn_cnt,attr="tmb") %>% select(mutation_burden_overview_cols))
+
+
+mutation_burden_overview = rbind(mutation_burden_overview, tp53_or_mdm2_mutations %>% dplyr::mutate(attr=gene_name,cnt=NA,cnt_type="1.complex_svs") %>% select(mutation_burden_overview_cols))
+
+mutation_burden_overview$patient_label=factor(mutation_burden_overview$patient_label,levels=label_order_svs)
+#mutation_burden_overview[is.na(mutation_burden_overview)]=0
+
+```
+
+### export
+
+```{r}
+mutation_burden_overview_wide = mutation_burden_overview %>% pivot_wider(id_cols = c("patient_label","cancer_type"), names_from="attr",values_from = "cnt")
+mutation_burden_overview_wide = mutation_burden_overview_wide %>% left_join(quant_svs_total %>% dplyr::rename(svs_cnt=total)) %>% left_join(patient_level_complex_sv_overview %>% select(patient_label,complex_svs_cnt,clinical_event) %>% dplyr::rename(complex_events_cnt=complex_svs_cnt) )
+#events vs svs 
+mutation_burden_overview_wide = mutation_burden_overview_wide %>% dplyr::rename(ecdna_amplicon=amplicon) 
+
+mutation_burden_overview_wide_cols = c("patient_label","cancer_type","svs_cnt","complex_events_cnt")
+mutation_burden_overview_wide_cols = c(mutation_burden_overview_wide_cols, names(mutation_burden_overview_wide)[!names(mutation_burden_overview_wide) %in% mutation_burden_overview_wide_cols])
+
+mutation_burden_overview_wide = mutation_burden_overview_wide[,mutation_burden_overview_wide_cols]
+write.table(mutation_burden_overview_wide,mutation_burden_path,sep="\t",quote=F,row.names = F,col.names = T)
+```
+
+## simple figure
+
+```{r}
+if(FALSE){
+pdf(paste0(cohort_results_dir,"complex_svs_quantification.pdf"),width=18,height=5)
+
+p = ggplot(quant_svs_superclasses,aes(x=patient_label,y=cnt,fill=attr)) + geom_col() +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle=90)) +
+  scale_fill_manual(values=annotation_colors$complex_sv_superclasses ) +
+  ggtitle("#SVs: complex classes, superclasses")
+
+p +   facet_grid(cols=vars(cancer_type),scales="free",space = "free")
+
+
+## counting complex 
+
+quant_complex_superclasses = quant_complex_superclasses_wide %>% pivot_longer(-patient_label,values_to = "cnt",names_to = "attr") %>% left_join(cohort[,c("patient_label","cancer_type")])
+
+quant_complex_superclasses$patient_label=factor(quant_complex_superclasses$patient_label,levels=label_order_svs)
+
+#combine counting svs and counting complex events to show how they collapse
+
+quant_complex_superclasses = rbind(quant_svs_superclasses %>% dplyr::mutate(cnt_type="2.complex_svs"),
+                                  quant_complex_superclasses %>% dplyr::mutate(cnt_type="1.complex_events"))
+
+quant_complex_superclasses$patient_label=factor(quant_complex_superclasses$patient_label,levels=label_order_svs)
+
+
+p = ggplot(quant_complex_superclasses %>% filter(attr != "simple"),aes(x=patient_label,y=cnt,fill=attr)) + geom_col() +
+  geom_hline(yintercept = 0,color="black") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle=90)) +
+  scale_fill_manual(values=annotation_colors$complex_sv_superclasses ) +
+
+  ggtitle("Comparing #svs and #complex events, per superclass")
+
+p_freex = p  +   facet_grid(cols=vars(cancer_type),rows=vars(cnt_type),scales="free",space = "free_x") 
+p_freex
+
+dev.off()
+
+}
+```
+
+## manuscript figure: mutation burden with TMB and FGA as bars 
+2023-07-14 
+
+```{r}
+mutation_burden_overview$cancer_type = factor(mutation_burden_overview$cancer_type,levels = names(cancer_type.labs))
+```
+
+```{r}
+pdf(paste0(cohort_results_dir,"complex_svs_quantification.tmb_fga.pdf"),width=18,height=9)
+#pdf(paste0(cohort_results_dir,"complex_svs_quantification.tmb_fga.squished.pdf"),width=18,height=4)
+
+#pdf(paste0(cohort_results_dir,"complex_svs_quantification.tmb_fga_ploidy_complex.pdf"),width=18,height=9)
+
+p = ggplot(mutation_burden_overview %>% filter(cnt_type!="4.ploidy" & cnt_type != "5.complex_fga" & cnt_type != "6.tmb" & cnt>0) ,aes(x=patient_label,y=cnt,fill=attr)) + 
+  geom_col(color="white",size=0) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_fill_manual(values=c(annotation_colors$complex_sv_superclasses,`fga_gain`="red3",`fga_loss`="steelblue3") ) +
+  ggtitle("#SVs: complex classes") +
+  facet_grid(cols=vars(cancer_type),rows=vars(cnt_type),scales="free",space = "free_x") 
+
+p = p + geom_point(data=filter(mutation_burden_overview,is.na(cnt)),y=-6,aes(shape=attr),size=2)
+
+p +   facet_grid(cols=vars(cancer_type),rows=vars(cnt_type),scales="free",space = "free_x",labeller = labeller(cancer_type = cancer_type.labs)) + theme(legend.position="bottom")#, legend.direction = "vertical")
+
+p
+
+
+
+p = ggplot(mutation_burden_overview ,aes(x=patient_label,y=cnt,fill=attr)) + 
+    geom_col(color="white",size=0) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_fill_manual(values=c(annotation_colors$complex_sv_superclasses,`fga_gain`="red3",`fga_loss`="steelblue3") ) +
+  ggtitle("#SVs: complex classes") +
+  facet_grid(cols=vars(cancer_type),rows=vars(cnt_type),scales="free",space = "free_x") 
+
+p + geom_point(data=filter(mutation_burden_overview,is.na(cnt)),y=-6,aes(shape=attr),size=2)
+
+
+dev.off()
+```
+
+```{r}
+pdf(paste0(cohort_results_dir,"fga_complex.pdf"),width=18,height=3)
+
+plot_complex_fga = cohort[,c("patient_label","cancer_type")] %>% left_join(complex_fga) #get all patients
+complex_fga$fga_complex
+
+plot_complex_fga$patient_label=factor(plot_complex_fga$patient_label,levels=label_order_svs)
+
+p = ggplot(plot_complex_fga ,aes(x=patient_label,y=fga_complex,fill=fga_complex_relative)) + 
+  geom_col(color="white",size=0) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle=90)) +
+  scale_fill_continuous(type="viridis") +
+  facet_grid(cols=vars(cancer_type),scales="free",space = "free_x") 
+p
+
+dev.off()
+```
+
+## enrichment
+
+```{r}
+mutation_burden_annotated=mutation_burden_overview_wide %>% left_join(patient_level_complex_sv_overview %>% select(patient_label,complex_sv,tp53_or_mdm2,days_sample_before_treatment))
+mutation_burden_annotated$fga=mutation_burden_annotated$fga_gain+mutation_burden_annotated$fga_loss
+
+mutation_burden_annotated = mutation_burden_annotated %>% mutate(treated_sample = days_sample_before_treatment<(-14))
+
+mutation_burden_metrics = c("fga","fga_gain","tmb","snv_indel_somatic_nonsyn_cnt","complex_events_cnt","svs_cnt")
+mutation_categories = c("complex_sv","tp53_or_mdm2","treated_sample")
+mutation_burden_enrichment=data.frame()
+
+for(ct in mutation_categories) {
+for(mb in mutation_burden_metrics){
+  row=c()
+  ct_values = unique(mutation_burden_annotated[,ct]) %>% length()
+  if(ct_values>2) {
+  test = kruskal.test(data=mutation_burden_annotated, formula(paste0(mb," ~ ",ct)))
+  row$type="kruskal"
+  } else {
+  test = wilcox.test(data=mutation_burden_annotated, formula(paste0(mb," ~ ",ct)))
+  row$type="wilcox"
+  }
+  row$pval = test$p.value
+  row$ct=ct
+  row$mb=mb
+  medians = mutation_burden_annotated %>% group_by(across(all_of(ct))) %>% get_min_max_median(mb) %>% select(c(ct,"median")) %>% pivot_wider(names_from=ct,values_from="median")
+  row$median_true=medians$`TRUE`
+  row$median_false=medians$`FALSE`
+  median_overall = mutation_burden_annotated %>% get_min_max_median(mb) 
+  row$median = median_overall$median
+  mutation_burden_enrichment = rbind(mutation_burden_enrichment,row)
+}
+}
+
+mutation_burden_enrichment=mutation_burden_enrichment %>% arrange(ct,pval)%>% mutate(sign=pval<0.05)
+mutation_burden_enrichment %>% filter(ct=="tp53_or_mdm2")
+mutation_burden_enrichment %>% filter(ct=="complex_sv")
+mutation_burden_enrichment %>% filter(ct=="treated_sample")
+
+
+write.table(mutation_burden_enrichment,enrichment_results_mutation_burden_path,sep="\t",row.names = F,col.names = T,quote=F)
+
+```
+
+```{r}
+
+mutation_burden_annotated %>% get_min_max_median("svs_cnt")
+mutation_burden_annotated %>% filter(complex_sv) %>% get_min_max_median("complex_events_cnt")
+mutation_burden_annotated %>% filter(complex_sv&tp53_or_mdm2) %>% get_min_max_median("complex_events_cnt")
+
+
+
+
+```
+
+
+#  Clinical events / relapse association
+
+```{r}
+
+complex_sv_clinical = patient_level_complex_sv_overview 
+counts_col_lst = c("clinical_events_cnt")
+for(col in counts_col_lst) {
+  complex_sv_clinical[is.na(complex_sv_clinical[,col]),col]=0
+}
+
+clinical_events_enrichment=data.frame()
+
+
+test_under_enriched=F
+filter_column_lst=c("complex_sv","complex_sv_driver_gene","sv_driver","tp53_or_mdm2","driver_gene_mutated","complex_sv_any_effect","driver_gene_mutated_no_complex")
+split_attr_lst=c("cancer_type","driver_gene_mutated")
+
+names(complex_sv_clinical)
+
+filter_column_lst = filter_column_lst[filter_column_lst %in% names(complex_sv_clinical)]
+counts_col_lst = counts_col_lst[counts_col_lst %in% names(complex_sv_clinical)]
+split_attr_lst = split_attr_lst[split_attr_lst %in% names(complex_sv_clinical)]
+
+
+for(filter_column in filter_column_lst) {
+for(counts_col in counts_col_lst) {
+for(counts_col_threshold in c(1)){
+
+for(split_attr in split_attr_lst) {
+split_value_lst = unique(complex_sv_clinical[,split_attr])
+if(split_attr=="cancer_type") { split_value_lst=c("pan_cancer",split_value_lst)}
+for(split_value in split_value_lst) {
+  if(split_value=="pan_cancer") {
+    event_counts_selection = complex_sv_clinical
+  } else {
+    event_counts_selection = complex_sv_clinical %>% filter(!!sym(split_attr) == split_value)
+  }
+  
+  under_and_condition = uq_patients(event_counts_selection %>% filter(!!sym(counts_col)<counts_col_threshold) %>% filter(if_all(filter_column)))
+  under_not_condition = uq_patients(event_counts_selection %>% filter(!!sym(counts_col)<counts_col_threshold)%>% filter(!if_any(filter_column)))
+  over_and_condition = uq_patients(event_counts_selection %>% filter(!!sym(counts_col)>=counts_col_threshold) %>% filter(if_all(filter_column)))
+  over_not_condition = uq_patients(event_counts_selection %>% filter(!!sym(counts_col)>=counts_col_threshold) %>% filter(!if_any(filter_column)))
+              
+  if(test_under_enriched) {
+  fisher.table= matrix(c(  under_and_condition,  under_not_condition,  
+                           over_and_condition,  over_not_condition   ),nrow=2)
+  } else {
+    fisher.table= matrix(c(  over_and_condition,  over_not_condition,  
+                             under_and_condition,  under_not_condition ),nrow=2)
+  }
+  
+  print(paste0(split_value, " ",counts_col," ",counts_col_threshold))
+  print(fisher.table)
+  t=fisher.test(fisher.table)
+  print(t)
+  
+  #case is under thresh meets condition and control over threshold meets condition
+  
+  row=c()
+  row$test_under_enriched=test_under_enriched
+  row$filter_column=filter_column
+  row$split_attr=split_attr
+  row$split_value=split_value
+  row$counts_col = counts_col
+  row$counts_col_thresh = counts_col_threshold
+  row$pval=t$p.value
+  row$odds_ratio=t$estimate[[1]]
+  row$conf_int=toString(c(t$conf.int[1],t$conf.int[2]))
+  
+  row$frac_under_and_condition_of_under=under_and_condition/(under_and_condition+under_not_condition)
+  row$frac_over_and_condition_of_over=over_and_condition/(over_and_condition+over_not_condition)
+  row$frac_under_and_condition_of_condition=under_and_condition/(under_and_condition+over_and_condition)
+  row$frac_over_and_condition_of_condition=over_and_condition/(under_and_condition+over_and_condition)
+  row$frac_under_and_not_condition_of_not_condition=under_not_condition/(under_not_condition+over_not_condition)
+  row$frac_over_and_not_condition_of_not_condition=over_not_condition/(under_not_condition+over_not_condition)
+
+  row$under_and_condition=under_and_condition
+  row$over_and_condition=over_and_condition
+  row$under_and_not=under_not_condition
+  row$over_and_not=over_not_condition
+  
+
+  clinical_events_enrichment=rbind(clinical_events_enrichment,row)
+} 
+}
+}
+}
+}
+
+
+write.table(clinical_events_enrichment,clinical_events_enrichment_path,sep = "\t",col.names = T,row.names = F,quote=F)
+
+```
+## analyse enrichment results
+```{r}
+#original:
+clinical_events_enrichment %>% filter(split_value=="pan_cancer") %>% select(-contains("frac_under"),-conf_int,-counts_col_thresh,-test_under_enriched) %>% arrange(pval) %>%
+  filter(counts_col=="clinical_events_cnt")
+  #filter(filter_column=="complex_sv")
+  #filter(filter_column=="complex_sv_any_effect" )
+  #filter(filter_column=="complex_sv_driver_gene" )
+
+```
+
+
+Sanity checks:
+```{r}
+complex_sv_clinical %>% nrow()
+complex_sv_clinical %>% filter(clinical_event>=1) %>% nrow()
+complex_sv_clinical %>% filter(complex_sv) %>% nrow()
+complex_sv_clinical %>% filter(clinical_event>=1 & complex_sv) %>% nrow()
+complex_sv_clinical %>% filter(complex_sv_any_effect) %>% nrow()
+complex_sv_clinical %>% filter(complex_sv_driver_gene) %>% nrow()
+complex_sv_clinical %>% filter(clinical_event>=1 & complex_sv_any_effect) %>% nrow()
+
+complex_sv_clinical %>% filter(tp53_or_mdm2) 
+```
+
+2023-08-17 updated the gene list 
+
+41% of tumors with a complex sv affecting driver gene had a clinical event compared to 19% of non-complex (p<0.05, OR2.8) 
+
+complex sv detected remains the same
+pan cancer => 2.45 enrichment pval = 0.056
+63% of clinical event have complex sv, and 34% of complex sv had clinical event compared to 17% of non-complex. 
+(19 pt both clinical and complex, of the 56 complex and total 30 clinical)
+
+
+
+# Figure: complex events effect
+
+```{r}
+quant_complex_svs_effect = complex_svs_annotated %>% group_by(patient_label) %>% summarize(complex_svs_cnt_effect=sum(effect!="unknown"))
+
+if("complex_svs_cnt_effect" %in% names(patient_level_complex_sv_overview)) {
+  patient_level_complex_sv_overview = patient_level_complex_sv_overview %>% select(-complex_svs_cnt_effect)
+}
+patient_level_complex_sv_overview = patient_level_complex_sv_overview %>% left_join(quant_complex_svs_effect) %>% mutate(complex_svs_cnt_effect=ifelse(is.na(complex_svs_cnt_effect),0,complex_svs_cnt_effect))
+
+
+label_order_complex_driver = patient_level_complex_sv_overview %>% arrange(complex_sv_driver_gene,driver_gene_mutated,tp53_or_mdm2,complex_svs_cnt_driver,complex_svs_cnt,clinical_event) %>% dplyr::mutate(patient_label = as.character(patient_label)) %>% select(patient_label) %>% unique() %>% flatten_chr() %>% rev()
+
+#maybe sort of number of effect as well?
+label_order_complex_effect = patient_level_complex_sv_overview %>% arrange(complex_sv_driver_gene,complex_svs_cnt_driver,complex_svs_cnt_effect,complex_svs_cnt,driver_gene_mutated,tp53_or_mdm2,clinical_event) %>% dplyr::mutate(patient_label = as.character(patient_label)) %>% select(patient_label) %>% unique() %>% flatten_chr() %>% rev()
+
+write.table(label_order_complex_driver,paste0(cohort_results_dir,"label_order_complex_driver.tmp"))
+write.table(label_order_complex_effect,paste0(cohort_results_dir,"label_order_complex_effect.tmp"))
+
+patient_level_complex_sv_overview$patient_label=factor(patient_level_complex_sv_overview$patient_label,levels=label_order_complex_driver)
+patient_level_complex_sv_overview$patient_label=factor(patient_level_complex_sv_overview$patient_label,levels=label_order_complex_effect)
+
+complex_svs_annotated = complex_svs_annotated %>% left_join(patient_level_complex_sv_overview)
+complex_svs_annotated$patient_label=factor(complex_svs_annotated$patient_label,levels=label_order_complex_driver)
+complex_svs_annotated = complex_svs_annotated %>% arrange(effect)
+
+```
+
+
+
+with pattern
+```{r}
+
+display_patient_level_complex_sv_overview=patient_level_complex_sv_overview
+display_patient_level_complex_sv_overview$cancer_type = factor(display_patient_level_complex_sv_overview$cancer_type,levels = names(cancer_type.labs))
+
+display_complex_svs_annotated = complex_svs_annotated
+display_complex_svs_annotated$cancer_type = factor(display_complex_svs_annotated$cancer_type,levels = names(cancer_type.labs))
+
+if(FALSE){
+p = ggplot(display_patient_level_complex_sv_overview) + 
+  geom_point(aes(x=patient_label,y=1),color="white") +
+  geom_point(data=filter(display_patient_level_complex_sv_overview,driver_gene_mutated),aes(x=patient_label,y=-0.25,color="clinrel")) +
+  geom_point(data=filter(display_patient_level_complex_sv_overview,tp53_or_mdm2),aes(x=patient_label,y=-0.5,color="tp53/mdm2")) +
+  geom_bar(data=display_complex_svs_annotated,aes(x=patient_label,fill=effect)) +
+  #geom_col(color="white",size=0,aes(x=patient_label,y=cnt,fill=attr)) +
+  facet_grid(cols=vars(cancer_type),scales="free",space = "free") + 
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_fill_manual(values=c(`unknown`="grey",`driver`="red3",`target_gene_cn_change`="pink3",chrom_alt="steelblue3")) +
+  ggtitle("#Complex events")
+
+p = p + facet_grid(cols=vars(cancer_type),scales="free",space = "free",labeller = labeller(cancer_type = cancer_type.labs))
+p 
+
+p +   geom_point(data=filter(display_patient_level_complex_sv_overview,clinical_event),aes(x=patient_label,y=-0.75,color="clinical_event")) 
+}
+
+```
+```{r}
+pdf(paste0(cohort_results_dir,"complex_svs_effect.",run_date,".pdf"),width=18,height=5)
+
+annotation_pattern_effect = c(`unknown`="none",`driver`="weave",`driver_and_chrom_alt`="circle",chrom_alt="stripe")
+   
+p = ggplot(display_patient_level_complex_sv_overview,aes(x=patient_label)) + 
+  geom_point(aes(y=1),color="white") +
+  geom_bar_pattern(data=display_complex_svs_annotated,aes(fill=complex_sv_class_super,pattern=effect,pattern_spacing=cancer_type,alpha=effect),pattern_color="black",color="white",pattern_fill="black",pattern_alpha=0.4) +
+  facet_grid(cols=vars(cancer_type),scales="free_x",space = "free") + 
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_fill_manual(values=annotation_colors$complex_sv_superclasses) +
+  scale_pattern_manual(values=annotation_pattern_effect,guide="none") + 
+  scale_pattern_spacing_manual(values = c(`ewing_sarcoma`=0.05,`neuroblastoma`= 0.025,`embryonal_rhabdomyosarcoma` = 0.05, `nephroblastoma` = 0.03, `hepatoblastoma` = 0.1, `alveolar_rhabdomyosarcoma` = 0.18),guide = "none") +
+  scale_alpha_manual(values=c(`unknown`=0.8,`driver`=1,`target_gene_cn_change`=1,chrom_alt=1),guide = "none")
+
+p = p + facet_grid(cols=vars(cancer_type),scales="free",space = "free",labeller = labeller(cancer_type = cancer_type.labs))
+
+p + theme(legend.position="bottom")#, legend.direction = "vertical")
+
+
+p +
+  geom_point(data=filter(display_patient_level_complex_sv_overview,driver_gene_mutated),aes(x=patient_label,y=-0.25,shape="clinrel")) +
+  geom_point(data=filter(display_patient_level_complex_sv_overview,tp53_or_mdm2),aes(x=patient_label,y=-0.5,shape="tp53/mdm2")) +
+  geom_point(data=filter(display_patient_level_complex_sv_overview,clinical_event),aes(x=patient_label,y=-0.75),color="red3") 
+
+p + theme(legend.position="bottom")  +
+  geom_point(data=filter(display_patient_level_complex_sv_overview,driver_gene_mutated),aes(x=patient_label,y=-0.25,shape="clinrel")) +
+  geom_point(data=filter(display_patient_level_complex_sv_overview,tp53_or_mdm2),aes(x=patient_label,y=-0.5,shape="tp53/mdm2")) +
+  geom_point(data=filter(display_patient_level_complex_sv_overview,clinical_event),aes(x=patient_label,y=-0.75),color="red3") 
+
+
+p +
+  geom_point(data=filter(display_patient_level_complex_sv_overview,driver_gene_mutated_no_complex),aes(x=patient_label,y=-0.25,shape="clinrel_no_complex")) +
+  geom_point(data=filter(display_patient_level_complex_sv_overview,tp53_or_mdm2),aes(x=patient_label,y=-0.5,shape="tp53/mdm2")) +
+  geom_point(data=filter(display_patient_level_complex_sv_overview,clinical_event),aes(x=patient_label,y=-0.75),color="red3") 
+
+
+
+p = ggplot(display_complex_svs_annotated,aes(x=patient_label,pattern=effect)) + 
+  geom_bar_pattern(pattern_color="black",color="white",pattern_fill="black") +
+  scale_pattern_manual(values=annotation_pattern_effect)
+p
+p + theme(legend.position="bottom")#, legend.direction = "vertical")
+
+dev.off()
+```
+
+# Manuscript numbers [remove below this for github]
+
+```{r}
+clinrel_mutations_incl_prognostic  %>% uq_patients()
+clinrel_mutations_incl_prognostic %>% filter(sv_alteration)  %>% uq_patients()
+clinrel_mutations_incl_prognostic %>% filter(complex_sv_alteration) %>% uq_patients()
+
+patient_level_complex_sv_overview %>% filter(cancer_type=="ewing_sarcoma") %>% uq_patients()
+patient_level_complex_sv_overview %>% filter(complex_sv_driver_gene_expected& cancer_type=="ewing_sarcoma") %>% uq_patients()
+
+patient_level_complex_sv_overview %>% filter(complex_svs_cnt_driver>0 & complex_svs_cnt_driver==complex_svs_cnt) %>% uq_patients()
+patient_level_complex_sv_overview %>% filter(complex_sv_driver_gene_expected
+                                     & complex_svs_cnt_driver>0 & complex_svs_cnt_effect==complex_svs_cnt
+                                     ) %>% uq_patients() # M157AAB = 19 of 21
+#for 19 of 21 tumors with expected ddriver complex sv,it is only complex sv
+
+patient_level_complex_sv_overview %>% filter(!complex_sv_driver_gene_expected
+                                     & complex_svs_cnt_effect>0 & complex_svs_cnt_effect==complex_svs_cnt
+                                     ) %>% uq_patients() #for 10 of 21 tumors with candidate complex sv,it is only complex sv
+
+
+patient_level_complex_sv_overview %>% filter(complex_svs_cnt_driver>0) %>% uq_patients()
+patient_level_complex_sv_overview %>% filter(!complex_sv_driver_gene_expected & complex_svs_cnt_driver>0) %>% uq_patients()
+patient_level_complex_sv_overview %>% filter(complex_svs_cnt_driver==0 & complex_svs_cnt_effect>0) %>% uq_patients()
+patient_level_complex_sv_overview %>% filter(complex_svs_cnt_effect>complex_svs_cnt_driver & complex_svs_cnt_driver>0) %>% uq_patients()
+
+complex_svs_annotated %>% 
+  group_by(effect) %>%
+  summarise(complex_cnt=n(),patient_cnt=cnt_str(patient_label))
+
+```
+breakpoints nearby cancer genes
+```{r}
+
+svs_per_superclass = merged_svs %>% cnt_uq(attr_name="svs_cnt",group_cols = c("complex_sv_class_super"))
+
+#only consider coding genes otherwise very high
+svs_per_superclass_summary = svs_per_superclass %>% 
+  left_join(merged_svs %>% filter(flag_cancer_gene_sv_bp_1mb_pmc)  %>% cnt_uq(attr_name="svs_cnt_gene_1mb_pmc",group_cols = c("complex_sv_class_super")) ) %>%
+  left_join(merged_svs  %>% filter(flag_cancer_gene_sv_bp_pmc) %>% cnt_uq(attr_name="svs_cnt_in_gene_pmc",group_cols = c("complex_sv_class_super"))) %>%
+  left_join(merged_svs %>% filter(flag_cancer_gene_sv_bp_1mb)  %>% cnt_uq(attr_name="svs_cnt_gene_1mb_cancer_gene",group_cols = c("complex_sv_class_super")) ) %>%
+  left_join(merged_svs  %>% filter(flag_cancer_gene_sv_bp) %>% cnt_uq(attr_name="svs_cnt_in_gene_cancer_gene",group_cols = c("complex_sv_class_super")))
+
+total_sums = svs_per_superclass_summary[2:6] %>% colSums() %>% t() %>% as.data.frame("total") 
+total_sums$complex_sv_class_super=rownames(total_sums)
+
+complex_sums = svs_per_superclass_summary[1:4,2:6] %>% colSums() %>% t() %>% as.data.frame("all_complex") 
+complex_sums$complex_sv_class_super=rownames(complex_sums)
+
+svs_per_superclass_summary = rbind(svs_per_superclass_summary,complex_sums,total_sums)
+svs_per_superclass_summary =  svs_per_superclass_summary %>% 
+  dplyr::mutate(
+                frac_gene_1mb_pmc = svs_cnt_gene_1mb_pmc/svs_cnt,
+                frac_in_gene_pmc = svs_cnt_in_gene_pmc/svs_cnt,
+                frac_gene_1mb_cancer = svs_cnt_gene_1mb_cancer_gene/svs_cnt,
+                frac_in_gene_cancer = svs_cnt_in_gene_cancer_gene/svs_cnt)
+
+svs_per_superclass_summary
+
+merged_svs$patient_sv_merged %>% unique() %>% length()
+merged_svs %>% filter(flag_is_complex) %>% select(patient_sv_merged) %>% unique() %>% nrow()
+svs_per_superclass_summary %>% select(complex_sv_class_super,svs_cnt,contains("pmc"))
+```
+
+
+```{r}
+complex_sv_superclass_patients = merged_svs %>% cnt_uq(attr_name="patient_cnt",group_cols = c("complex_sv_class_super"),uq_id = "patient_label")
+
+complex_sv_superclass_patients
+```
+## looking into cases
+```{r}
+complex_svs_annotated %>% left_join(patient_level_complex_sv_overview) %>% filter(grepl("driver",effect) & !complex_sv_driver_gene_expected) %>% select(complex_sv_id,effect,contains("driver")) #%>% uq_patients()
+
+#patients with complex and complex expected
+clinrel_mutations_incl_prognostic %>% filter(complex_sv_expected & complex_sv_alteration) %>% uq_patients()
+clinrel_mutations_incl_prognostic %>% filter(complex_sv_expected & complex_sv_alteration) %>% select(gene_name) %>% unique()
+#other clinrel non-complex or not-expected in these patients with complex drivers eg mycn ews pax
+clinrel_mutations_incl_prognostic %>% filter(patient_label %in% filter(clinrel_mutations_incl_prognostic,complex_sv_expected & complex_sv_alteration)$patient_label) %>% filter(!complex_sv_alteration | !complex_sv_expected) %>% select(patient_gene, alteration_simple)
+
+
+#complex with driver gene but not expected
+clinrel_mutations_incl_prognostic %>% filter(!complex_sv_expected & complex_sv_alteration) %>% select(patient_gene,complex_sv_class)
+
+#other clinrel non-complex in these patients
+clinrel_mutations_incl_prognostic %>% filter(patient_label %in% filter(clinrel_mutations_incl_prognostic,!complex_sv_expected & complex_sv_alteration)$patient_label) %>% filter(!complex_sv_alteration ) %>% select(patient_gene, alteration_simple,flag_affected_by_sv_1mb_cn_change) %>% arrange(patient_gene)
+
+#CTNNB1 is OK, MYOD1 is known, but what about  M382AAA_ARID1A w/o alteration simple > indirect sv?
+#yes loss and nearby breakpoint, patient also has MYCL amp  on the same chrom
+
+```
+
+
+# Analyse complex svs effect
+
+
+## complex svs of unknown effect - do tumors have known drivers or not?
+
+```{r}
+
+complex_svs_annotated %>% filter(effect=="unknown") %>% filter(!patient_label %in% filter(complex_svs_annotated,effect!="unknown")$patient_label)  %>% filter(patient_label %in% filter(patient_level_complex_sv_overview,driver_gene_mutated)$patient_label) %>% uq_patients()
+
+complex_svs_annotated %>% filter(effect=="unknown") %>% filter(!patient_label %in% filter(complex_svs_annotated,effect!="unknown")$patient_label)  %>% filter(!patient_label %in% filter(patient_level_complex_sv_overview,driver_gene_mutated)$patient_label) %>% uq_patients()
+
+
+
+complex_svs_annotated %>% filter(effect=="unknown") %>% filter(!patient_label %in% filter(complex_svs_annotated,effect!="unknown")$patient_label)  %>% filter(patient_label %in% filter(patient_level_complex_sv_overview,driver_gene_mutated)$patient_label) %>% left_join(clinrel_mutations_incl_prognostic[,c("patient_label","gene_name")],by=c("patient_label")) %>% select(c("patient_label","gene_name","cancer_type")) %>% unique()
+```
+
+
+clin rel event  or tumors with complex sv with effect?
+
+```{r}
+filter(complex_svs_annotated,effect!="unknown")$patient_label
+
+as.character(filter(complex_svs_annotated,effect!="unknown")$patient_label) %>% unique() %>% length()
+
+complex_svs_annotated %>% filter(effect=="chrom_alt")  %>% uq_patients()
+complex_svs_annotated %>% filter(effect=="driver")  %>% uq_patients()
+
+complex_svs_annotated %>% filter(effect=="chrom_alt") %>% 
+  filter(!patient_label %in% filter(complex_svs_annotated,effect=="driver")$patient_label)  %>%
+  uq_patients()
+
+complex_svs_annotated %>% filter(effect!="unknown") %>% 
+  filter(!patient_label %in% filter(complex_svs_annotated,effect=="chrom_alt")$patient_label)  %>%
+  filter(!patient_label %in% filter(complex_svs_annotated,effect=="driver")$patient_label)  %>%
+  uq_patients()
+
+complex_svs_annotated %>% filter(effect=="chrom_alt") %>% select(cancer_type,complex_sv_id, driver_cn_change,gene_sv_bp_1mb_pmc_lst) %>% as.tibble()
+
+complex_svs_annotated %>% filter(effect=="chrom_alt") %>% select(cancer_type,complex_sv_id, driver_cn_change,gene_sv_bp_1mb_pmc_lst) %>% as.tibble()
+
+```
+
+
+
+## check CN change poor prognostic for NBL and RMS
+2023-08-17
+
+```{r}
+
+complex_sv_classification %>% merge(complex_svs_annotated %>% filter(cancer_type=="neuroblastoma" & effect=="chrom_alt")) %>% select(complex_sv_id,driver_cn_change,svs_cnt,ctx_unbalanced_lst,sv_tumor_af_mean,sv_tumor_af_max)
+
+
+complex_sv_classification %>% merge(complex_svs_annotated %>% filter(cancer_type=="embryonal_rhabdomyosarcoma" & effect=="chrom_alt")) %>% select(complex_sv_id,driver_cn_change,svs_cnt,ctx_unbalanced_lst,complex_sv_class,sv_tumor_af_mean,sv_tumor_af_max)
+```
+
+
+
+```{r}
+if(FALSE) {
+  #quick looks
+  clinrel_mutations_incl_prognostic %>% filter(cancer_type=="embryonal_rhabdomyosarcoma") %>%  select(patient_label,cancer_type,gene_name,driver_gene,alteration_simple,sv_alteration,complex_sv_alteration,remarks) %>% arrange(patient_label,driver_gene)
+
+  
+  
+#no complex driver in patient:
+clinrel_mutations %>% filter(!patient_label %in% filter(clinrel_mutations,complex_sv_alteration)$patient_label) %>% select(patient_label,cancer_type,gene_name,alteration_simple,sv_alteration,driver_gene) %>% unique() 
+#clinrel_mutations_incl_prognostic to get candidates!
+
+#no driver at all
+#clinrel_mutations_incl_prognostic %>% filter(!patient_label %in% clinrel_mutations$patient_label) %>% select(patient_label,cancer_type,gene_name,alteration_simple,sv_alteration,driver_gene) %>% unique() 
+
+
+#no sv driver
+clinrel_mutations_incl_prognostic %>% filter(!patient_label %in% filter(clinrel_mutations,sv_alteration)$patient_label) %>% select(patient_label,cancer_type,gene_name,alteration_simple,sv_alteration,driver_gene) %>% unique() 
+
+clinrel_mutations_incl_prognostic %>% filter(!patient_label %in% filter(clinrel_mutations,complex_sv_alteration)$patient_label) %>% select(patient_label,cancer_type,gene_name,alteration_simple,sv_alteration,driver_gene) %>% unique() 
+
+#can use for figure now also got in it whether due to complex or not
+
+clinrel_mutations_incl_prognostic %>% filter(gene_name=="WT1") %>% select(patient_label,cancer_type,gene_name,alteration_simple,sv_alteration,complex_sv_alteration) %>% unique() 
+
+
+}
+```
+
+```{r}
+if(FALSE) {
+  ## sanity checks
+clinrel_mutations %>% filter(flag_affected_by_sv) %>% anti_join(overlaps_genes_svs[,c("patient_label","gene_name")])
+
+
+#clinrel_mutations[clinrel_mutations$patient_label=="M403AAB" & clinrel_mutations$gene_name=="WT1",] 
+#should have nearby 1mb but not in dataframe
+
+clinrel_mutations %>% filter(sv_alteration) %>% anti_join(overlaps_genes_svs_1mb[,c("patient_label","gene_name")])
+
+#indeed sv indirect not in sv bp     
+#missing 1 ctnnb1 del  %>% filter(patient_label=="M336AAD" & seqnames=="chr3")
+#going to use sv bp inside or 1mb and amplification / homloss to also get the MYCN
+
+
+#nearby mutations not selected 
+#M403AAB should be homloss > resolved
+#indeed M228AAA not MYCN and the ATRX nearby not enough
+#complex_footprints_annotated %>% filter(grepl("MYCN",gene_lst_footprints)) #patient_label=="M228AAA" & gene_name=="MYCN")
+
+overlaps_genes_svs_1mb %>% merge(map_clinrel_mutations) %>% anti_join(clinrel_mutations_incl_prognostic[clinrel_mutations_incl_prognostic$sv_alteration,c("patient_label","gene_name")] )
+
+#inside mutations not selected
+overlaps_genes_svs %>% merge(map_clinrel_mutations) %>% anti_join(clinrel_mutations_incl_prognostic[clinrel_mutations_incl_prognostic$sv_alteration,c("patient_label","gene_name")] )
+
+patient_gene_overview_detailed %>% filter(patient_gene=="M373AAD_CDKN2A")
+
+#going to use the clinrel mutations df 
+
+clinrel_mutations %>% uq_patients()
+clinrel_mutations %>% filter(sv_alteration)  %>% uq_patients()
+}
+```
+
+2023-07-08 =
+
+78% of patient have driver alterations by SV -> fusion genes no issue because of patient cnts
+46 of 59 patients (includes MYCN)
+24 patients complex = 52% 
+35 without complex = klopt
+
+44/60 = 0.73
+24/60 = 0.4
+24/44 = 0.55
+
+
+2023-07-08 => forgot about ALK so should update numbers
+
+44/65 = 0.68
+24/65 = 0.37
+24/44 = 0.55
+
+2023-08-12 also incl prognostic for drivers not just driver gene
+
+with affected being SV bp inside, homloss, amp, SNV/indel
+no VAF filtering tho.
+51/72 = 
+28/72 =
+28/51 =
+
+
+with gene level dataframe annotated with complex upfront
+including 1mb+gain/loss/loh (+MDM2 M365AAD has MYOD1 so stays 72)
+53/72 = 0.74
+30/72 = 0.42
+30/53 = 0.57
+
+ARID1A loss and 1mb sv and MYCL AMP and complex sv for M382AAA discutabel?
+
+
+2023-08-17 added more genes
+such as TP53/NF1 for neur => but not really because thripsis, also RAS mutations, PAX3::WWRT1 was missing in eRMS
+YAP1 amp
+56/78 = 0.72
+32/56 = 0.57
+42 still 
+
+```{r}
+##aneuploidy 
+#deprecated
+if(FALSE) {
+clinrel_mutations %>% left_join(mutation_burden_annotated) %>% 
+  filter(patient_label %in% clinrel_mutation_complex$patient_label) %>%
+  filter(full_gain_events_cnt>1) %>% select(patient_label,cancer_type) %>% unique()
+
+
+mutation_burden_annotated %>% 
+  filter(patient_label %in% clinrel_mutation_complex$patient_label) %>%
+  filter(full_gain_events_cnt>1) %>% select(patient_label,cancer_type) %>% unique()
+
+# 
+# Old numbers:
+# 4/24 patients with complex driver sv have >1 full gain (17%)
+# 4/48 patients with >1 full arm gain have complex driver sv (8%)
+# 
+# for 5 or more full gains 2/30 = 7% but 5 is arbitrary?
+# komt ook vooral omdat erms en hepato geen driver svs hebben
+}
+```
+
+
+
+
+# breakpoints of multisample
+
+```{r}
+#get the breakpoints to match
+pax_fusion_lookup = merged_svs_genes %>% filter( 
+  (grepl("PAX7|PAX3",start_gene_name) & grepl("FOXO1",end_gene_name)) |
+  (grepl("FOXO1",start_gene_name) & grepl("PAX7|PAX3",end_gene_name)) |
+    (grepl("PAX3",start_gene_name) & grepl("WWTR1",end_gene_name)) | 
+    (grepl("WWRT1",start_gene_name) & grepl("PAX3",end_gene_name)))
+
+
+cohort_multisample_path = "~/data/metadata/cohort_multisample.20230824.tsv"
+
+cohort_multisample = read.table(cohort_multisample_path,sep = "\t", header=T) 
+
+multisample_merged_svs_path = "~/results/solids_v4_multisample/merged_svs.multisample.20230824.tsv"
+multisample_merged_svs = read.table(multisample_merged_svs_path,sep = "\t", header=T) 
+
+multisample_merged_svs_gr = GRanges(multisample_merged_svs$sv_merged_coordinate)
+mcols(multisample_merged_svs_gr) = multisample_merged_svs
+names(multisample_merged_svs_gr) = multisample_merged_svs_gr$patient_sv_merged
+
+#perfect overlaps!
+pax_fusion_overlaps = get_reciprocal_overlap_pairs(merged_svs_gr[pax_fusion_lookup$patient_sv_merged],multisample_merged_svs_gr)
+
+pax_fusion_overlaps
+```
+
+# pax foxo visuals linear
+
+```{r}
+
+pax_foxo_fusions = merged_svs_genes %>% filter( 
+  (grepl("PAX7|PAX3",start_gene_name) & grepl("FOXO1",end_gene_name)) |
+  (grepl("FOXO1",start_gene_name) & grepl("PAX7|PAX3",end_gene_name)))
+
+pax_foxo_fusions
+
+target_svs = merged_svs %>% filter(patient_sv_merged %in% pax_foxo_fusions$patient_sv_merged  | partner_sv_merged %in% pax_foxo_fusions$patient_sv_merged | complex_sv_id %in% pax_foxo_fusions$complex_sv_id)
+
+
+annotation_colors$svtype = c(`DUP`="red3",`DEL`="steelblue3",`INV`= "mediumpurple2",`CTX`="purple3",`amplicon`="red4")
+plot_title="PAX FOXO fusions, 0.1 tumor AF filtering"
+
+pax_foxo_coord = gene_properties_df[gene_properties_df$gene_name %in% c("PAX3","PAX7","FOXO1"),]
+pax_foxo_coord$patient_sv_merged = pax_foxo_coord$gene_name
+pax_foxo_coord$svtype = pax_foxo_coord$gene_name
+
+
+pdf(paste0(cohort_results_dir,"plot_PAX_fusions.taf01.zoom_FOXO1.pdf"),height=8,width = 12)
+zoom_chr="chr13"
+  print(zoom_chr)
+
+  target_svs_zoom = target_svs %>% filter(seqnames %in% zoom_chr) 
+
+p = plot_target_svs_cn_data(target_svs_zoom,segments_df,cn_around_sv_bp=NULL,flag_plot_segval = F,display_intrasv_labels = F,display_ctx_labels = T,plot_order = c("cn_segments",unique(as.character(target_svs$svtype))),
+                              flag_segval_scale_amp = T,collapse_svtype = T,
+                            start_coord =39e6,cr_amplification_threshold=cr_amplification_threshold)  + 
+  theme(panel.spacing.y = unit(0, "lines")) + 
+  facet_grid(cols=vars(seqnames),rows=vars(patient_label,svtype),space = "free_y",scale="free") +
+  scale_fill_manual(values=c(annotation_colors$svtype,annotation_colors_call),na.value = "white") +
+  ggtitle(paste0(plot_title," ",zoom_chr, ", zoom FOXO1"))
+
+p + geom_rect(data=pax_foxo_coord %>% filter(seqnames %in% zoom_chr), aes(xmin=start/1e6,xmax=end/1e6,ymin=-0.5,ymax=0.5),fill="green",color="green",alpha=0.3)
+
+print(p)
+
+dev.off()
+
+
+
+pdf(paste0(cohort_results_dir,"plot_PAX_fusions.taf01.zoom_PAX.pdf"),height=4,width = 12)
+for(zoom_chr in list("chr1","chr2")) {
+  print(zoom_chr)
+
+  target_svs_zoom = target_svs %>% filter(seqnames %in% zoom_chr) 
+
+p = plot_target_svs_cn_data(target_svs_zoom,segments_df,cn_around_sv_bp=NULL,flag_plot_segval = F,display_intrasv_labels = F,display_ctx_labels = T,plot_order = c("cn_segments",unique(as.character(target_svs$svtype))),
+                              flag_segval_scale_amp = T,collapse_svtype = T,
+                            cr_amplification_threshold=cr_amplification_threshold)  + 
+  theme(panel.spacing.y = unit(0, "lines")) + 
+  facet_grid(cols=vars(seqnames),rows=vars(patient_label,svtype),space = "free_y",scale="free") +
+  scale_fill_manual(values=c(annotation_colors$svtype,annotation_colors_call),na.value = "white") +
+  ggtitle(paste0(plot_title," ",zoom_chr, ", zoom PAX7"))
+
+print(p + geom_rect(data=pax_foxo_coord %>% filter(seqnames %in% zoom_chr), aes(xmin=start/1e6,xmax=end/1e6,ymin=-0.5,ymax=0.5),fill="green",color="green",alpha=0.3))
+
+print(p)
+}
+dev.off()
+
+```
+
+
+

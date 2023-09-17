@@ -34,15 +34,15 @@
 ###
 
 ## Update 2021-10-07
-# somatic only script to see if the merged svs would be diffeent 
+# somatic only script to see if the merged svs would be different 
 
-## TEST CODE 
+## TEST CODE
 if(FALSE){
 
-  source('~/structuralvariation/sv_functional_analysis/default.conf');
-  source('~/structuralvariation/sv_functional_analysis/default.docker.conf');
-  source('~/structuralvariation/sv_functional_analysis/run/wilms_v2_20210923/wilms_v2_20210923.patient.conf');
-  source('~/structuralvariation/sv_functional_analysis/run/wilms_v2_20210923/wilms_v2_20210923.conf');
+  source('/hpc/pmc_gen/ivanbelzen/structuralvariation/sv_functional_analysis/default.conf');
+  source('/hpc/pmc_gen/ivanbelzen/structuralvariation/sv_functional_analysis/default.docker.conf');
+  source('/hpc/pmc_gen/ivanbelzen/structuralvariation/sv_functional_analysis/run/wilms_v2_20210923/wilms_v2_20210923.PMCID057AAK.conf');
+  source('/hpc/pmc_gen/ivanbelzen/structuralvariation/sv_functional_analysis/run/wilms_v2_20210923/wilms_v2_20210923.conf');
   
 }
 
@@ -172,8 +172,8 @@ all_gr = all_gr[all_gr$partner %in% names(all_gr)] #remove unpartnered
 read_support_colnames = colnames(metadata)[grepl("DV|DR|RV|RR|REF|SR|PR|VF",colnames(metadata))]
 read_support_colnames  = read_support_colnames[grepl("tumor|normal",read_support_colnames)]      
 
-sv_metadata_cols =  c("sourceId",  "svtype", "svLen", "partner","FILTER","QUAL",
-                      "insLen",  "tumor_af", "normal_af",  "somatic", "tool", "supporting_reads_tumor", read_support_colnames)
+sv_metadata_cols =  c("sourceId",  "svtype", "svLen", "partner","FILTER","QUAL","ALT","REF",
+                      "insLen", "HOMLEN", "tumor_af", "normal_af",  "somatic", "tool", "supporting_reads_tumor", read_support_colnames)
 
 svs = make_range_svs(all_gr,sv_metadata_cols)
 svs$patient_sv_name = paste0(patient$patient_id,"_",svs$sv_name)
@@ -182,6 +182,7 @@ svs_df = as.data.frame(svs)
 svs_df = unique(svs_df)
 svs_df$coordinate = paste0(svs_df$seqnames,":",svs_df$start,"-",svs_df$end,":",svs_df$strand)
 write.table(svs_df,svs_ranges_somatic_path,sep="\t",col.names = T,row.names = F,quote=F)
+
 
 cnt_svs_after_support_filter=nrow(svs_df)
 

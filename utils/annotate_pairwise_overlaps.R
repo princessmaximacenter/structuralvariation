@@ -15,17 +15,22 @@ if(FALSE){
   
   #using config or paths
   
-  source("~/structuralvariation/sv_functional_analysis/default.conf")
-  source("~/structuralvariation/sv_functional_analysis/default.docker.conf")
-  source("~/structuralvariation/sv_functional_analysis/run/wilms_v2_20210923/wilms_v2_20210923.conf")
-  source("~/structuralvariation/sv_functional_analysis/run/wilms_v2_20210923/wilms_v2_20210923.patient.conf")
+  source("/hpc/pmc_gen/ivanbelzen/structuralvariation/sv_functional_analysis/default.conf")
+  source("/hpc/pmc_gen/ivanbelzen/structuralvariation/sv_functional_analysis/default.docker.conf")
+  source("/hpc/pmc_gen/ivanbelzen/structuralvariation/sv_functional_analysis/run/wilms_v2_20210923/wilms_v2_20210923.conf")
+  source("/hpc/pmc_gen/ivanbelzen/structuralvariation/sv_functional_analysis/run/wilms_v2_20210923/wilms_v2_20210923.PMCID772AAJ.conf")
   
   #alternatively specify 
   #svs_path=""
   #patient_id=""
   
   sv_analysis_type="somatic"
-   
+  
+  source("/hpc/pmc_gen/ivanbelzen/structuralvariation/utils/annotate_pairwise_overlaps.R")
+  
+  source('/hpc/pmc_gen/ivanbelzen/case_studies/all_germline/PMRBM000AHT_PMRBM000AHV_PMRBM000AHU.conf');
+  source('/hpc/pmc_gen/ivanbelzen/case_studies/all_germline/trio_analysis.conf');
+  
 }
 
 #default
@@ -45,6 +50,57 @@ suppressPackageStartupMessages({
 source(paste0(script_dir,"functions.general.R"))
 source(paste0(script_dir,"functions.svs.R"))
 source(paste0(utils_script_dir,"functions.population_svs.R"))
+
+## local override todo refactor
+make_sv_bp_gene_partnered = function(sv_bp_gene_overlaps, gene_overlap_cols=c("gene_type","gene_name","gene_id"),svs_df_cols = c("patient_sv_name","patient_sv_merged","partner_sv_name","svtype")) {
+  
+  svs_unique_cols=c(svs_df_cols,gene_overlap_cols)
+  svs_unique_cols=svs_unique_cols[svs_unique_cols %in% names(sv_bp_gene_overlaps)]
+  
+  svs_to_genes = sv_bp_gene_overlaps[,svs_unique_cols] %>% unique()
+  
+  
+  ## For CTX only => rest will not have partner sv name matching like this, 
+  # but do not use     filter(patient_sv_name %in% svs_to_genes$partner_sv_name) because then no longer svs with 1 edge 
+  #if you dont remove sv bp orientation you will get inflated counts
+  
+  sv_bp_gene_partnered_ctx = svs_to_genes %>% filter(svtype=="CTX") %>%
+    left_join(svs_to_genes %>% select(-svtype),
+              by=c("partner_sv_name"="patient_sv_name","patient_sv_name"="partner_sv_name"))
+  
+  sv_bp_gene_partnered_ctx = sv_bp_gene_partnered_ctx %>% 
+    dplyr::rename_with(.cols = ends_with(".y"), function(x){paste0("partner_",substr(x,0,stop = (str_length(x)-2)))}) %>% 
+    dplyr::rename_with(.cols = ends_with(".x"), function(x){substr(x,0,stop = (str_length(x)-2))})
+  
+  sv_bp_gene_partnered_ctx = sv_bp_gene_partnered_ctx %>% dplyr::rename(partner_sv_merged = partner_patient_sv_merged)
+  
+  #with sv bp orientation for intra-svs
+  svs_to_genes_orientation = sv_bp_gene_overlaps[,c(svs_unique_cols,"sv_breakpoint_orientation")] %>% unique()
+  
+  #in case only 'end' coordinate, include it in the first datafame and will not have a partner in the 2nd
+  sv_bp_gene_partnered_intra = svs_to_genes_orientation %>% filter(svtype!="CTX") %>%
+    filter(sv_breakpoint_orientation=="start" | !patient_sv_name %in% filter(svs_to_genes_orientation,sv_breakpoint_orientation=="start")$patient_sv_name ) %>% 
+    select(-sv_breakpoint_orientation) %>% unique() 
+  sv_bp_gene_partnered_intra_2 = svs_to_genes_orientation %>% filter(svtype!="CTX") %>%
+    filter(sv_breakpoint_orientation=="end" & patient_sv_name %in% filter(svs_to_genes_orientation,sv_breakpoint_orientation=="start")$patient_sv_name ) %>% 
+    select(patient_sv_name,all_of(gene_overlap_cols)) %>% unique() %>%
+    dplyr::rename_with(.cols = all_of(gene_overlap_cols), function(x){paste0("partner_",x)}) 
+  
+  sv_bp_gene_partnered_intra = sv_bp_gene_partnered_intra %>% left_join(sv_bp_gene_partnered_intra_2)
+  
+  sv_bp_gene_partnered_intra$partner_sv_merged = sv_bp_gene_partnered_intra$patient_sv_merged
+  
+  sv_bp_gene_partnered_cols = c(names(sv_bp_gene_partnered_ctx),names(sv_bp_gene_partnered_intra)) %>% unique()
+  
+  sv_bp_gene_partnered = rbind(sv_bp_gene_partnered_ctx[,sv_bp_gene_partnered_cols],
+                               sv_bp_gene_partnered_intra[,sv_bp_gene_partnered_cols])
+  
+  
+  #check if all rows are there
+  #nrow(sv_bp_gene_overlaps %>% filter(!patient_sv_name %in% sv_bp_gene_partnered$patient_sv_name))!=0
+  
+  return(sv_bp_gene_partnered)
+} 
 
 ## Fill path templates
 map_template_vars=c('${resources_dir}'=resources_dir,'${merged_svs_dir}'=merged_svs_dir,'${utils_output_dir}'=utils_output_dir,
