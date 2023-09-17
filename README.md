@@ -60,7 +60,7 @@ Gene lists:
     *   resources/map_clinrel_chromalt.txt
 
 
-![Downstream analysis](downstream_analysis.png)
+![Downstream analysis](pipeline_overview.png)
 
 
 ## Usage 
