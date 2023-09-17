@@ -5,15 +5,15 @@ Toolkit used to generate results for ongoing structural variation projects in th
 This repo contains code to infer consensus somatic structural variants (SVs) from DELLY, Manta and GRIDSS, and also to annotate these variants. In addition, see `utils` and `analyses` for scripts supporting the results of our latest manuscripts.
 
 ## Subclasses of 1q gain in Wilms tumors (v0.1)
+
 doi: 10.3390/cancers14194872
+
 For example, unsupervised clustering based on copy number (CN) data and gene expression data, inferring chromosome status from CN data, as well as various integrative omics analyses.
 
 * Unsupervised clustering CN data
     *   utils/make_cn_clusters.R
-
 * Unsupervised clustering expression data
     *   utils/make_expression_clusters.R
-
 * Integrate SNV/indel/CN/SVs/expression 
     *   utils/integrate_omics.R 
 
@@ -25,53 +25,42 @@ Complex SV detection and categorization into chromothripsis, chromoplexy and amp
 Supporting scripts:
 * Amplicons
     *   utils/get_amplicons.R
-
 * Integrate amplicons and SVs
     *   analyses/amplicons_connected_by_svs.R
-
 * Unbalanced translocations
     *   utils/annotate_svs_cn_change.R
-
 * Complex SV detection and categorization
 also makes merged_svs_classes annotated with genes and complex SV classes
     *   utils/get_complex_sv_clusters.R
-
 * Regions recurrently hit by SVs
     *   analyses/get_svs_recurrent_regions.R
-
 * Merged SVs annotated with repeats 100 bp
     *   utils/annotate_svs_repeats.R
-
 * Hotspot plotting and analysis
     *   analyses/analyse_recurrent_regions_svs.Rmd
-
 * Patient-gene level overview of alterations, integration of SNVs/indels/SVs
     *   utils/make_gene_alteration_overview.R
-
 * Driver gene alterations
     *   utils/make_driver_gene_alteration_overview.R
-
 * Complex SVs effect, annotate with driver gene / chrom alterations
     *   analyses/complex_svs_effect.R
-
 * Oncoprint with driver genes and adverse chrom alterations
     *   analyses/oncoprint.R
-
 * Chrom level CN calls (numerical) - FGA, aneuploidy
     *   utils/get_numerical_cn_changes.R
-
 * Mutation burden analysis and plots
     *   analyses/analyse_complex_svs.Rmd
 
 Gene lists:
 * Pediatric cancer gene panel
     *   resources/diagnostic_somatic_2.5.lst
-
 * Cancer driver genes per cancer t ype
     *   resources/map_clinrel_mutations.txt
-
 * Unfavorable chromosomal alterations, per cancer type
     *   resources/map_clinrel_chromalt.txt
+
+
+![Downstream analysis](downstream_analysis.png)
 
 
 ## Usage 
