@@ -1,0 +1,8 @@
+cancer_type	cancer_type_abbrev
+ewing_sarcoma	ewing
+nephroblastoma	wilms
+osteosarcoma	osteo
+alveolar_rhabdomyosarcoma	aRMS
+embryonal_rhabdomyosarcoma	eRMS
+hepatoblastoma	hepbl
+neuroblastoma	neur

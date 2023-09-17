@@ -48,7 +48,6 @@ if(!exists("snv_vcf_path")) {
   snv_vcf_path = paste0(snv_data_dir,patient_basename,snv_vcf_file_ext)
 }
 
-
 suppressPackageStartupMessages({
   library(GenomicRanges, quietly=TRUE)
   library(VariantAnnotation, quietly=TRUE)
@@ -139,7 +138,12 @@ if(length(Sys.glob(paste0(snv_file,".tbi")))==1){
     
     #testing purposes only 
     #snv_vep_df=head(snv_vep_df,n=1000)
-    snv_vep_df = snv_vep_df %>% separate(col="CSQ",into=vep_columns,sep="\\|",extra = "drop")
+    #snv_vep_df = snv_vep_df %>% separate(col="CSQ",into=vep_columns,sep="\\|",extra = "drop")
+    
+    #update 2023-08-21 expand list to get all predictions and solve missing mutations
+    
+    snv_vep_df = snv_vep_df %>% unnest_longer(col=c("CSQ")) %>% as.data.frame() #%>% dplyr::select(snv_id,CSQ)
+    snv_vep_df = snv_vep_df %>% separate(col="CSQ",into=vep_columns,sep="\\|",extra = "drop") %>% unique()
     
     ## Add from geno() the AF, AD, DP
     snv_vep_df = snv_vep_df[,!names(snv_vep_df) %in% c("AF","AD","DP")]
@@ -150,8 +154,7 @@ if(analysis_type=="somatic"){
   snv_geno_df= parse_snv_geno_germline(snv_vcf)
 }
 
-    snv_vep_df = snv_vep_df %>% 
-      left_join(snv_geno_df,by="snv_id")
+    snv_vep_df = snv_vep_df %>%  left_join(snv_geno_df,by="snv_id")
 
     snv_gene_panel = subsetByOverlaps(rowRanges(snv_vcf),gene_panel)
     
@@ -194,6 +197,8 @@ if(analysis_type=="somatic"){
       snv_id_selection=snv_vep_df[snv_vep_df$normal_AF>0.05,c("snv_id")]
     }
     
+    snv_id_selection = unique(snv_id_selection)
+    
     snv_output_df = as.data.frame(rowRanges(snv_vcf[snv_id_selection]))
     
     alt = as.character(unlist(snv_vcf$ALT))
@@ -203,8 +208,7 @@ if(analysis_type=="somatic"){
       snv_output_df$ALT = NA
     }
       
-    snv_output_df= snv_output_df %>% mutate(snv_id = rownames(.)) %>% 
-      left_join(snv_vep_df,by="snv_id")
+    snv_output_df= snv_output_df %>% mutate(snv_id = rownames(.)) %>% left_join(snv_vep_df,by="snv_id")
     
     ##2022-03-09
     ##disable subset by overview cols -> output all unless

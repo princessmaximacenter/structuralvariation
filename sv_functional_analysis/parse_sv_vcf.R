@@ -38,10 +38,10 @@
 
 ## TEST CODE 
 if(FALSE){
-  source('~/structuralvariation/sv_functional_analysis/default.conf');
-  source('~/structuralvariation/sv_functional_analysis/default.docker.conf');
-  source('~/structuralvariation/sv_functional_analysis/run/wilms_v2_20210923/wilms_v2_20210923.patient.conf');
-  source('~/structuralvariation/sv_functional_analysis/run/wilms_v2_20210923/wilms_v2_20210923.conf');
+  source('/hpc/pmc_gen/ivanbelzen/structuralvariation/sv_functional_analysis/default.conf');
+  source('/hpc/pmc_gen/ivanbelzen/structuralvariation/sv_functional_analysis/default.docker.conf');
+  source('/hpc/pmc_gen/ivanbelzen/structuralvariation/sv_functional_analysis/run/wilms_v2_20210923/wilms_v2_20210923.PMCID057AAK.conf');
+  source('/hpc/pmc_gen/ivanbelzen/structuralvariation/sv_functional_analysis/run/wilms_v2_20210923/wilms_v2_20210923.conf');
   
   #default for sv prefiltering
   read_support_threshold = 6
@@ -168,7 +168,7 @@ if(length(Sys.glob(vcf_gridss_path))!=1) {
   read_support_colnames = colnames(mcols(all_gr))[grepl("DV|DR|RV|RR|REF|SR|PR|VF",colnames(mcols(all_gr)))]
   read_support_colnames  = read_support_colnames[grepl("tumor|normal",read_support_colnames)]      
   
-  sv_metadata_cols =  c("sourceId",  "svtype", "svLen", "partner","FILTER","QUAL",
+  sv_metadata_cols =  c("sourceId",  "svtype", "svLen", "partner","FILTER","QUAL", "ALT","REF",
                         "insLen",  "tumor_af", "normal_af",  "somatic", "tool",read_support_colnames)
   
   svs = make_range_svs(all_gr,sv_metadata_cols)
