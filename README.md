@@ -4,7 +4,7 @@ Toolkit used to generate results for ongoing structural variation projects in th
 
 This repo contains code to infer consensus somatic structural variants (SVs) from DELLY, Manta and GRIDSS, and also to annotate these variants. In addition, see `utils` and `analyses` for scripts supporting the results of our latest manuscripts.
 
-## Subclasses of 1q gain in Wilms tumors (v0.1)
+## Subclasses of 1q gain in Wilms tumors (v1.0)
 
 doi: 10.3390/cancers14194872
 
@@ -17,7 +17,8 @@ For example, unsupervised clustering based on copy number (CN) data and gene exp
 * Integrate SNV/indel/CN/SVs/expression 
     *   utils/integrate_omics.R 
 
-## Complex SV patterns in pediatric solid tumors (v0.2)
+## Complex SV patterns in pediatric solid tumors (v2.0)
+
 doi: 
 
 Complex SV detection and categorization into chromothripsis, chromoplexy and amplicon/ecDNA (extrachromosomal DNA) as well as analysis of whether they affect cancer driver genes or result in adverse chromosomal alterations associated with poor outcome. 
@@ -54,9 +55,9 @@ also makes merged_svs_classes annotated with genes and complex SV classes
 Gene lists:
 * Pediatric cancer gene panel
     *   resources/diagnostic_somatic_2.5.lst
-* Cancer driver genes per cancer t ype
+* Cancer driver genes per cancer type
     *   resources/map_clinrel_mutations.txt
-* Unfavorable chromosomal alterations, per cancer type
+* Unfavorable chromosomal alterations per cancer type
     *   resources/map_clinrel_chromalt.txt
 
 
