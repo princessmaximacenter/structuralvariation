@@ -19,8 +19,6 @@ For example, unsupervised clustering based on copy number (CN) data and gene exp
 
 ## Complex SV patterns in pediatric solid tumors (v2.0)
 
-doi: 
-
 Complex SV detection and categorization into chromothripsis, chromoplexy and amplicon/ecDNA (extrachromosomal DNA) as well as analysis of whether they affect cancer driver genes or result in adverse chromosomal alterations associated with poor outcome. 
 
 Supporting scripts:
