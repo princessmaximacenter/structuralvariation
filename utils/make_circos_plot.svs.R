@@ -177,18 +177,6 @@ no_taf_map_amplicons_merged_svs_start_end = no_taf_map_amplicons_merged_svs_star
 
 ## Run circos ----
 
-pid="M911AAA"
-pid="M147AAD"
-pid="M222AAD"
-pid="M217AAD"
-
-##todo zoom in of 
-pid="M074AAD"
-pid="M075AAD"
-
-#all amplicons 
-pid="M002AAB"
-
 flag_scale_amp=F
 flag_no_taf=F
 flag_amplicons_ctx_both_sides=T #both sides of ctx need to be in amplicon, disable to getinsertion points
@@ -199,73 +187,7 @@ plot_type="reciprocal_ctx"
 plot_type="complex_svs_amplicons"
 flag_color_by_complex_sv=T
 
-patients_with_amplicons_svs = filter(no_taf_map_amplicons_merged_svs_start_end,both_sides)$patient_label %>% unique()
-patients_with_amplicons_complex = filter(merged_svs_classes,complex_sv_class=="amplicon")$patient_label %>% unique()
-
-#patients_svs_df = merged_svs %>% filter(cancer_type=="ewing_sarcoma"  &!is.na(complex_sv_id))
-if(FALSE) {
-  ##2023-04-28 attempt at recurrent ctx but need to show per patient only 1 link and want proper recurrence/overlap
-ctx_partners_cnt = merged_svs %>% filter(svtype=="CTX") %>%
-  group_by(cancer_type,chrom,partner_chrom) %>% summarize(
-    patient_cnt=cnt_str(patient_label),patient_lst=lst_str(patient_label)) %>%
-  arrange(-patient_cnt) %>% filter(cancer_type!="osteosarcoma") 
-
-patients_svs_df = merged_svs %>% 
-   #filter(cancer_type=="neuroblastoma")%>% 
-  merge(ctx_partners_cnt[ctx_partners_cnt$patient_cnt>=3,c("cancer_type","chrom","partner_chrom")])
-
-wt1_complex = c("M062AAB_complex_acc7b569197a760f7a9e9719f868e44d","M407AAA_complex_a43284d02285a1ba9d6bcb84aae39b2a","M301AAD_complex_78612e130d6d3444543dba839a52752a")
-
-patients_svs_df = merged_svs %>% 
-  filter(cancer_type=="nephroblastoma") %>% 
-  filter(complex_sv_id %in% wt1_complex)
-  #filter(grepl("chr11",chrom_lst))
-  #filter(svtype=="CTX") %>% filter(!is.na(complex_sv_id)) %>% filter(chrom=="chr11" | partner_chrom=="chr11")
-
-
-cancertype_col=annotation_colors$cancer_type %>% as.data.frame() 
-cancertype_col$cancer_type=rownames(cancertype_col)
-colnames(cancertype_col)=c("color","cancer_type")
-
-patient_col = rand_color(length(unique(patients_svs_df$patient_label)),luminosity = "bright") %>% as.data.frame() 
-patient_col$patient_label=unique(patients_svs_df$patient_label)
-colnames(patient_col)=c("color","patient_label")
-
-display_ctx = patients_svs_df %>% filter(svtype=="CTX") %>%
-  select(all_of(c(display_sv_cols,"partner_sv_merged","partner_sv_merged_coordinate","cancer_type","patient_label"))) %>% 
-  filter(!is.na(sv_merged_coordinate)&!is.na(partner_sv_merged_coordinate)) %>% unique() %>%
-  left_join(patient_col)#left_join(cancertype_col) 
-
-
-intra_svs = patients_svs_df %>% filter(svtype!="CTX") %>% 
-  select(all_of(c(display_sv_cols,"cancer_type","patient_label")))
-
-display_intra_svs = GRanges(intra_svs$sv_merged_coordinate) %>% as.data.frame() 
-display_intra_svs$patient_sv_merged=intra_svs$patient_sv_merged
-display_intra_svs = display_intra_svs %>% left_join(intra_svs) %>% 
-  left_join(patient_col)#left_join(cancertype_col) left_join(intra_svtype_col,by="svtype")
-
-chr_lst = unique(c(patients_svs_df$chrom,filter(patients_svs_df,svtype=="CTX")$partner_chrom))
-
-#pdf_path = paste0(results_dir,"recurrent_ctx_3ormore.pdf")
-pdf_path = paste0(results_dir,"wt1_recurrent.wilms.pdf")
-#pdf(pdf_path)
-
-init_circos_default(chr_lst,start_degree=180)
-
-
-#init_circos_default()
-draw_ctx(display_ctx,transparency = 0.95)
-draw_intra_svs(display_intra_svs,transparency = 0.85)
-
-circos.clear()
-
-dev.off()
-
-}
-
-for(pid in patients_with_amplicons_complex){
-#for(pid in cohort$patient_label){
+for(pid in cohort$patient_label){
   patient = filter(cohort,patient_label==pid)
   print(paste0("Running: ",patient$patient_label))
 
