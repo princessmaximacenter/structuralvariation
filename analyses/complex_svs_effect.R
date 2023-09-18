@@ -1,11 +1,10 @@
 # Complex SVs effect
+# annotate with effect based on affecting cancer driver genes or unfavorable chromosomal alterations
+# manual exclusions and inclusions 
+# export for manuscript including additional properties
 
-## Last update 2023-09-03
+## Last update 2023-09-18
 
-## TODO:
-# manual exclusions and inclusions better way with external tables
-# export for manuscript including fewer columns & additional properties
-# refactor clinrel CN change to elsewhere? like driver gene alterations /clinrel mutations 
 
 wdir="~/PycharmProjects/structuralvariation/sv_functional_analysis/"
 source(paste0(wdir,"default.conf"))
@@ -26,7 +25,7 @@ minimum_cna_width = 5e6
 
 
 #input
-map_clinrel_chromalt_path = paste0(resources_dir,"map_clinrel_chromalt.txt")
+map_clinrel_chromalt_path = paste0(metadata_dir,"map_clinrel_chromalt.txt")
 
 run_date=20230701
 merged_svs_classes_path = paste0(cohort_results_dir,"merged_svs_classes.",run_date,".tsv")
@@ -128,25 +127,6 @@ map_complex_sv_cn_change = map_complex_sv_cn_change %>% mutate(clinrel=patient_c
 #beware of CN change due to amplicon, have seen a few cases where it is just underlying aneuploidy, but can still be from the rearrangement so cant filter out all 
 map_complex_sv_cn_change %>% filter(complex_sv_class=="amplicon") %>% select(complex_sv_id,chr_arm,call,source,clinrel) %>% unique() %>% arrange(complex_sv_id)
 
-if(FALSE) {
-  #to explore:
-  map_complex_sv_cn_change = map_complex_sv_cn_change %>% 
-  dplyr::mutate(cn_details_display = paste0(chr_arm," ",call," (",
-ifelse(source=="footprint_overlap",paste0(round(overlap_cna_bp/1e6,2)," Mbp of "),
-       "unb ctx "),round(cna_width/1e6,2)," Mbp @ ",round(cna_mean_cr_l2fc_50,2)," crl2fc)"))
-
-#lot of duplication, do not include
-complex_sv_footprint_cn_change_summary = map_complex_sv_cn_change %>% 
-  filter(source=="footprint_overlap") %>% group_by(patient_label,complex_sv_id) %>% 
-  summarize(footprint_overlap_cn_change = lst_str(paste0(chr_arm," ",call," (",cn_details_display,")")))
-
-#use the reduced version maybe? but then ranges and not the separate segs
-complex_cn_change_regions_path = paste0(cohort_results_dir,"complex_sv_cn_change_regions.",run_date,".tsv")
-complex_cn_change_regions = read.table(complex_cn_change_regions_path,sep="\t",header=T)
-
-}
-
-##todo rename to clinrel_cn_change
 clinrel_complex_sv_cn_change_summary = clinrel_complex_sv_cn_change %>% 
   group_by(patient_label,complex_sv_id) %>% 
   summarize(driver_cn_change = lst_str(paste0(chr_arm," ",cn_change," (",source,")")))
@@ -171,21 +151,23 @@ tumor_af_complex = merged_svs %>% filter(flag_is_complex) %>% group_by(patient_l
 
 complex_svs_annotated = complex_svs_annotated %>% left_join(tumor_af_complex)
 
-if(FALSE) {
-  #minimum
-  #but want all properties for classification 
-selected_cols = c("amplicon_overlap","svs_cnt","ctx_cnt","chrom_cnt",
+selected_cols = c("complex_sv_id","amplicon_overlap","amplicon_footprint_lst","amplicon_cr_mean",
+                  "svs_cnt","ctx_cnt","chrom_cnt",
                   "closed_chain","dist_chrom_pair_max_mbp","footprint_max_mbp",
                   "chrom_cn_balanced_or_edge_all","ctx_unbalanced_any",
+                  "ctx_unbalanced_lst","ctx_balanced_or_edge_chrom_lst",
                   "svtypes_chisq_pval","seg_cnt_cn_change_sum","ctx_chrom_pair_max","max_sv_cov_complex")
-}
+#
+#names(complex_sv_classification)[!names(complex_sv_classification) %in% selected_cols]
+
+complex_svs_annotated = complex_svs_annotated %>% left_join(complex_sv_classification %>% select(all_of(selected_cols)))
 
                                        
 # Export ----
 if(length(Sys.glob(complex_svs_effect_path))>0 & override_if_exists==F) {
   print("Output already exists, did not override")
 } else {
-  write.table(complex_svs_annotated,complex_svs_effect_path,row.names = F,col.names = T,sep="\t",quote = F)
+  write.table(complex_svs_annotated %>% arrange(complex_sv_id),complex_svs_effect_path,row.names = F,col.names = T,sep="\t",quote = F)
     
   #write for oncoprint, because manually curated
   #todo refactor later?

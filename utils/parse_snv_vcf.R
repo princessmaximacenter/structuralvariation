@@ -226,7 +226,7 @@ if(analysis_type=="somatic"){
   cds_selection = snv_output_df[snv_output_df$IMPACT %in% c("HIGH","MODERATE") | snv_output_df$snv_id %in% names(snv_gene_panel),c("snv_id")]
     
    snv_cds_mapping = data.frame()
-  for(snv_name in cds_selection){
+  for(snv_name in cds_selection) {
       snv = rowRanges(snv_vcf)[snv_name]
       
       genome(snv)="GRCh38"
